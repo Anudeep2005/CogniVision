@@ -1,0 +1,28 @@
+name: vision_aid_app
+description: Vision Aid App using Gemini Live API
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_ai: ^2.2.0
+  flutter_riverpod: ^2.6.1
+  record: ^6.0.0
+  flutter_soloud: ^3.2.2
+  camera: ^0.11.0+2
+  flutter_animate: ^4.5.0
+  flutter_tts: ^3.8.5
+  image: ^4.2.0
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
