@@ -59,25 +59,7 @@ class _VisionScreenState extends ConsumerState<VisionScreen> {
 
       await voiceEngine.speak('Vision mode activated. Scanning surroundings.');
 
-      // Start continuous scanning
-      _cameraController!.startImageStream((image) async {
-        if (_isProcessing) return;
-        _isProcessing = true;
-
-        try {
-          // 1. Convert CameraImage to Uint8List for YOLO
-          // (Simplified for brevity. A real implementation needs proper YUV->RGB conversion)
-          // Since YUV->RGB in Dart is slow, we will only run YOLO every few seconds
-          // Or we can just use takePicture() periodically.
-        } catch (e) {
-          debugPrint('Stream error: $e');
-        } finally {
-          _isProcessing = false;
-        }
-      });
-      
       // We will use a Timer to take pictures instead of startImageStream to avoid memory issues and complex YUV conversion
-      _cameraController!.stopImageStream();
       _startPeriodicScan();
 
     } catch (e) {
@@ -115,8 +97,13 @@ class _VisionScreenState extends ConsumerState<VisionScreen> {
         final faces = await faceRecognitionService.detectFaces(inputImage);
         
         if (faces.isNotEmpty) {
-           await voiceEngine.speak('Detected ${faces.length} faces.');
-           // (Embedding extraction would go here)
+           // For each face, we'd normally crop and get embedding
+           // For now, we'll announce we see people
+           await voiceEngine.speak('Detected ${faces.length} people.');
+           
+           // If we had a trained model, we'd do:
+           // final name = faceRecognitionService.identifyFace(embedding);
+           // await voiceEngine.speak('I see $name');
         }
 
       } catch (e) {
