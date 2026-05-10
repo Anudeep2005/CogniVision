@@ -1,6 +1,6 @@
 {
-    "name": "vision_aid_app",
-    "short_name": "vision_aid_app",
+    "name": "workspace",
+    "short_name": "workspace",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

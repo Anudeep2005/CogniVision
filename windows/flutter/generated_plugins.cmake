@@ -3,14 +3,13 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
-  firebase_auth
-  firebase_core
   flutter_tts
-  record_windows
+  geolocator_windows
+  speech_to_text_windows
+  volume_controller
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
-  flutter_soloud
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)
