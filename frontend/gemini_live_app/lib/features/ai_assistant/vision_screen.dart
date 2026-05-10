@@ -97,13 +97,17 @@ class _VisionScreenState extends ConsumerState<VisionScreen> {
         final faces = await faceRecognitionService.detectFaces(inputImage);
         
         if (faces.isNotEmpty) {
-           // For each face, we'd normally crop and get embedding
-           // For now, we'll announce we see people
            await voiceEngine.speak('Detected ${faces.length} people.');
            
-           // If we had a trained model, we'd do:
-           // final name = faceRecognitionService.identifyFace(embedding);
-           // await voiceEngine.speak('I see $name');
+           for (final face in faces) {
+             final embedding = await faceRecognitionService.getEmbedding(face, bytes);
+             if (embedding != null) {
+               final name = faceRecognitionService.identifyFace(embedding);
+               if (name != null) {
+                 await voiceEngine.speak('I see $name');
+               }
+             }
+           }
         }
 
       } catch (e) {
