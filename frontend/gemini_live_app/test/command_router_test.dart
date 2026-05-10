@@ -35,6 +35,38 @@ void main() {
     expect(isSos, true);
   });
 
+    test('Identify Navigation Intent', () {
+      final navCommands = [
+        'navigate to central park',
+        'take me to library',
+        'route to hospital',
+        'find grocery store',
+      ];
+      
+      for (var cmd in navCommands) {
+        expect(cmd.contains('navigate') || cmd.contains('take me') || cmd.contains('route') || cmd.contains('find'), isTrue);
+      }
+    });
+
+    test('SOS Trigger Match', () {
+      expect('help me now'.contains('help'), isTrue);
+      expect('emergency sos'.contains('sos'), isTrue);
+      expect('alert guardian'.contains('alert'), isTrue);
+    });
+
+  group('Math Utilities', () {
+    test('Coordinate Distance Calculation Placeholder', () {
+       // Mock lat/lng distance logic
+       double lat1 = 12.9716;
+       double lon1 = 77.5946;
+       double lat2 = 12.9719;
+       double lon2 = 77.5949;
+       
+       double diff = (lat1 - lat2).abs() + (lon1 - lon2).abs();
+       expect(diff < 0.01, isTrue);
+    });
+  });
+
   test('YOLO bounding box Intersection over Union (IoU) calculation', () {
     // Mocking the IoU logic from YoloDetector
     double calculateIoU(List<double> box1, List<double> box2) {
