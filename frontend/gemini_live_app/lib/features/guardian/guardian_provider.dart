@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:vision_aid_app/core/services/socket_service.dart';
+import 'package:vision_aid_app/providers.dart';
 
 // State to hold the visually impaired user's location
 class GuardianState {
@@ -20,9 +21,10 @@ class GuardianState {
 class GuardianNotifier extends Notifier<GuardianState> {
   @override
   GuardianState build() {
-    // Initialize socket connection (hardcoded userId for demo purposes)
-    // In a real app, this userId would come from a login/pairing screen
-    socketService.initSocket('guardian_123');
+    // Initialize socket connection using real Auth UID
+    final authState = ref.read(authStateProvider);
+    final userId = authState.value?.uid ?? 'anonymous_guardian';
+    socketService.initSocket(userId);
 
     // Listen for location updates
     socketService.onLocationUpdate((data) {
