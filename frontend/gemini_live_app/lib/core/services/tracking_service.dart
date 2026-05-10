@@ -5,7 +5,7 @@ import 'package:vision_aid_app/core/services/api_service.dart';
 
 class TrackingService {
   final ApiService _apiService = ApiService();
-  final FirebaseDatabase _database = FirebaseDatabase.instance;
+  final DatabaseReference _rtdbRef = FirebaseDatabase.instance.ref();
   
   String get baseUrl => _apiService.baseUrl;
 
@@ -14,13 +14,24 @@ class TrackingService {
     required double latitude,
     required double longitude,
   }) async {
-    // 1. Sync to MongoDB (via Backend API)
+    // 1. Sync to Firebase RTDB (for IoT layer compliance)
+    try {
+      await _rtdbRef.child('users').child(userId).child('location').set({
+        'lat': latitude,
+        'lng': longitude,
+        'timestamp': DateTime.now().toIso8601String(),
+      });
+    } catch (e) {
+      print('Firebase RTDB Sync Error: $e');
+    }
+
+    // 2. Sync to MongoDB (via Backend API)
     try {
       await http.post(
-        Uri.parse('$baseUrl/location/update'), // Updated to match latest API route
+        Uri.parse('$baseUrl/location/update'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'firebaseUid': userId, // Updated to match backend field
+          'firebaseUid': userId,
           'lat': latitude,
           'lng': longitude,
           'timestamp': DateTime.now().millisecondsSinceEpoch,
@@ -28,17 +39,6 @@ class TrackingService {
       );
     } catch (e) {
       print('MongoDB Sync Error: $e');
-    }
-
-    // 2. Sync to Firebase Realtime Database (for IoT layer compliance)
-    try {
-      await _database.ref('locations/$userId').set({
-        'lat': latitude,
-        'lng': longitude,
-        'timestamp': ServerValue.timestamp,
-      });
-    } catch (e) {
-      print('Firebase RTDB Sync Error: $e');
     }
   }
 }
