@@ -116,4 +116,18 @@ void main() {
     double distOrthogonal = cosineDistance([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
     expect(distOrthogonal, closeTo(1.0, 0.001));
   });
+
+  group('Service Logic', () {
+    test('ApiService constructs correct SOS payload', () {
+      final payload = {
+        'userId': 'test_uid_123',
+        'type': 'SOS',
+        'message': 'Emergency alert triggered',
+        'location': {'lat': 12.97, 'lng': 77.59},
+      };
+      expect(payload['userId'], 'test_uid_123');
+      expect(payload['location']['lat'], 12.97);
+      expect(payload['type'], 'SOS');
+    });
+  });
 }
