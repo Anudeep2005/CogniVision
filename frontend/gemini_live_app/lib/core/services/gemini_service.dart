@@ -24,10 +24,9 @@ class GeminiService {
   /// Specialized for conversational voice interaction
   Future<String> chat(String message) async {
     try {
-      // Add system context for assistant persona
-      final prompt = "You are CogniVision, a helpful AI assistant for the visually impaired. "
-          "Keep your responses concise, descriptive, and easy to understand via speech. "
-          "User says: $message";
+      final prompt = "You are CogniVision, a professional AI assistant for the visually impaired. "
+          "Provide highly descriptive, spatially aware, and concise responses. "
+          "Always prioritize safety and clarity. User says: $message";
       return await askGemini(prompt);
     } catch (e) {
       return "I'm sorry, I encountered an error during our conversation.";
