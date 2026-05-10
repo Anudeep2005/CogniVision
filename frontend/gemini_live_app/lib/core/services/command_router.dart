@@ -57,11 +57,12 @@ class CommandRouter {
     else if (lowerCmd.contains('vision') || lowerCmd.contains('describe')) {
       ref.read(userModeProvider.notifier).setMode(AppMode.vision);
       await voiceEngine.speak('Switched to Vision mode. Scanning surroundings.');
-      // Phase 7: Trigger Gemini/Gemma Vision here
+      // Phase 7 Hook: The VisionScreen UI will detect the mode change 
+      // and trigger the periodic scanning or description logic.
     } 
     else if (lowerCmd.contains('profile')) {
       ref.read(userModeProvider.notifier).setMode(AppMode.profile);
-      await voiceEngine.speak('Profile mode. Your pair code is A B C D 1 2 3 4.');
+      await voiceEngine.speak('Profile mode.');
     } 
     else if (lowerCmd.contains('alert guardian') || lowerCmd.contains('help') || lowerCmd.contains('sos')) {
       await _triggerSOS();
@@ -74,7 +75,7 @@ class CommandRouter {
       } else {
         // Use Gemini for general queries
         await voiceEngine.speak("Thinking...");
-        final response = await geminiService.askGemini(command);
+        final response = await geminiService.chat(command);
         await voiceEngine.speak(response);
       }
     }
@@ -95,13 +96,18 @@ class CommandRouter {
   }
 
   Future<void> _triggerSOS() async {
+    final authState = ref.read(authStateProvider);
+    final user = authState.value;
+    final String uid = user?.uid ?? 'anonymous_user';
+
     await voiceEngine.speak('Alerting your guardian immediately.');
     
     // 1. Send via Socket for real-time update
     socketService.socket.emit('SOS_ALERT', {
-      'userId': 'user_123',
+      'userId': uid,
       'type': 'SOS',
-      'status': 'active'
+      'status': 'active',
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
     });
 
     // 2. Send via REST for persistence and push notifications
@@ -109,9 +115,9 @@ class CommandRouter {
       final position = await Geolocator.getCurrentPosition();
       final apiService = ApiService();
       await apiService.triggerSos(
-        firebaseUid: 'user_123_firebase', // Mocked UID
-        lat: position.latitude,
-        lng: position.longitude,
+        firebaseUid: uid,
+        latitude: position.latitude,
+        longitude: position.longitude,
       );
     } catch (e) {
       debugPrint('Failed to send SOS to backend: $e');
