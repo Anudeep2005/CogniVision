@@ -1,153 +1,64 @@
-# CogniVision: Advanced Assistive Intelligence 👁️🤖
+# CogniVision
 
-**Empowering the visually impaired through AI-driven computer vision, smart navigation, and real-time guardian monitoring.**
+CogniVision is an assistive mobile application designed to empower visually impaired individuals by enabling them to navigate outdoor environments safely and independently. The app leverages the smartphone camera and AI-based vision technology to continuously analyze the surroundings, detect obstacles, and deliver real-time audio guidance to the user. By making individuals aware of their environment, CogniVision helps users move confidently through public spaces without relying on external assistance.
 
-[![Flutter](https://img.shields.io/badge/Flutter-02569B?style=for-the-badge&logo=flutter&logoColor=white)](https://flutter.dev)
-[![Node.js](https://img.shields.io/badge/Node.js-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org)
-[![MongoDB](https://img.shields.io/badge/MongoDB-47A248?style=for-the-badge&logo=mongodb&logoColor=white)](https://www.mongodb.com)
-[![Firebase](https://img.shields.io/badge/Firebase-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com)
+## 🎯 Problem Statement
+Visually impaired individuals struggle to navigate outdoor environments safely due to limited real-time obstacle detection in existing mobility aids, creating a strong need for an intelligent, audio-guided assistive solution.
 
----
-
-## 📌 One-Line Problem Statement
-Visually impaired individuals face significant barriers in independent navigation and environmental awareness, requiring a seamless, real-time integration of AI vision, voice-guided navigation, and remote guardian oversight to ensure safety and autonomy.
-
----
-
-## 🖼️ System Screenshots
-
-<p align="center">
-  <img src="screenshots/vision_mode_ui.png" width="30%" alt="Vision Mode" />
-  <img src="screenshots/navigation_mode_ui.png" width="30%" alt="Navigation Mode" />
-</p>
-
----
-
-## 🛠️ Architecture Diagram
-
+## 🏗️ Architecture
 ```mermaid
 graph TD
-    subgraph "On-Device Processing (Flutter)"
-        A[Camera Stream] --> B[YOLOv8 Detection]
-        A --> C[ML Kit Face Detection]
-        C --> D[MobileFaceNet Recognition]
-        B --> E[Voice Engine TTS]
-        D --> E
-        F[Voice Commands STT] --> G[Gemini Vision / LLM]
-        G --> E
-    end
-
-    subgraph "External Systems"
-        H[Google Maps API] <--> I[Navigation Service]
-        J[Firebase Auth] <--> K[App Core]
-    end
-
-    subgraph "Backend Infrastructure (Node.js)"
-        L[Express Server] <--> M[(MongoDB)]
-        L <--> N[Socket.io Real-time]
-    end
-
-    subgraph "IoT Integration"
-        O[ESP32 Wearable] --> P[GPS Data]
-        P --> L
-    end
-
-    K <--> L
-    I <--> H
+    A[Visually Impaired User] --> B[Flutter Mobile App]
+    C[Guardian/Caregiver] --> B
+    D[IoT Layer: ESP32 + NEO-6M] --> E[Firebase Realtime Database]
+    E --> B
+    B --> F[Backend: Node.js/Express]
+    F --> G[Database: MongoDB]
+    B --> H[Google AI: Gemini Vision]
+    B --> I[Firebase Auth]
 ```
 
----
+## 🔍 Project Scope
 
-## ✅ Feature Implementation Checklist
+### IN SCOPE
+CogniVision is a Flutter-based assistive mobile application designed specifically for visually impaired individuals to navigate outdoor environments safely and independently. The scope of this project covers the complete development of a mobile application that integrates multiple technologies including artificial intelligence, IoT hardware, cloud services, and real-time communication to deliver a holistic assistive experience.
 
-| Feature | Status | Implementation Detail |
-| :--- | :---: | :--- |
-| **YOLOv8 Object Detection** | ✅ | On-device inference via TFLite in `lib/features/ai_assistant/yolo_detector.dart` |
-| **Face Recognition** | ✅ | ML Kit + MobileFaceNet + Hive in `lib/core/services/face_recognition_service.dart` |
-| **Gemini Vision (Scene Desc)** | ✅ | Multimodal Gemini integration in `lib/core/services/gemini_service.dart` |
-| **Voice Navigation** | ✅ | Google Maps Polyline integration in `lib/core/services/navigation_service.dart` |
-| **Node.js Backend** | ✅ | REST API & Mongoose schemas in `backend/src/index.js` |
-| **SOS Alert System** | ✅ | End-to-end trigger in `lib/core/services/command_router.dart` |
-| **IoT Firmware** | ✅ | ESP32 + NEO-6M GPS code in `firmware/location.ino` |
-| **Test Suite** | ✅ | Meaningful unit & widget tests in `test/` |
+*   **Real-Time Object Detection**: Using YOLOv8 through the smartphone camera, providing continuous audio alerts about surrounding obstacles to ensure safe movement.
+*   **Face Detection and Recognition**: Using Google ML Kit and the MobileFaceNet model, allowing users to identify known individuals in their surroundings.
+*   **AI Voice Assistant**: Built on Firebase AI (Gemini), enabling natural user interaction through voice commands and receiving intelligent audio responses.
+*   **Outdoor Navigation**: Integrates Google Maps API for real-time turn-by-turn audio navigation, helping users travel independently.
+*   **Guardian Navigation**: Allows caregivers or family members to remotely monitor and guide the visually impaired user in real time through the app.
+*   **In-App Map Rendering**: Handled using `flutter_map` and `latlong2`, while `geolocator` continuously tracks the user's live location.
+*   **IoT Component**: An ESP32 microcontroller paired with a NEO-6M GPS module for precise location tracking.
+*   **Cloud & Data**: 
+    *   **Firebase Realtime Database**: Seamless data synchronization between the IoT hardware and the application.
+    *   **Firebase Authentication & MongoDB**: Secure user account management and persistent data storage.
+*   **SOS Alert System**: Integrated to immediately notify pre-configured emergency contacts whenever the user encounters a critical situation.
 
----
+### OUT OF SCOPE
+*   Indoor navigation and mapping using Bluetooth beacons or Wi-Fi-based positioning systems are not covered in this project.
+*   Wearable device integration such as smartwatches, smart glasses, or haptic feedback wristbands is not included in the current development plan.
+*   Advanced health monitoring features such as fall detection, heart rate tracking, or emergency medical alerts are not part of the current application.
 
-## 📁 Project Structure
+## 🛠️ Technical Stack
 
-```text
-CogniVision/
-├── backend/            # Node.js + Express + MongoDB Server
-├── firmware/           # ESP32 IoT Location Tracking Code
-├── screenshots/        # Application UI Previews
-└── frontend/
-    └── gemini_live_app/
-        ├── lib/
-        │   ├── core/           # Shared services (Voice, Vision, Navigation)
-        │   ├── features/       # Modular features (Auth, AI, Tracker)
-        │   └── routes/         # App routing & navigation
-        └── test/               # Unit & Widget tests
-```
+| Category | Technology |
+| :--- | :--- |
+| **APIs** | Google Maps API, http package, url_launcher |
+| **Navigation** | flutter_map, latlong2, geolocator |
+| **IoT** | ESP32, NEO-6M GPS, Firebase Realtime Database |
+| **Emergency** | SOS Alert System |
+| **Backend** | Node.js, Express, MongoDB, Mongoose |
+| **Vision** | YOLOv8 (TFLite), ML Kit Face Detection, MobileFaceNet |
+| **Voice Assistant** | Firebase AI powered assistant (Gemini Flash API) |
 
----
+## 🚀 Future Enhancements
+*   **Smart Glasses Integration**: Can be implemented in future versions, enabling hands-free real-time object detection and navigation guidance delivered directly through the glasses for a more seamless assistive experience.
+*   **Enhanced SOS Alert System**: Directly notify emergency contacts with instant notifications and provide a direct communication channel within the app for faster emergency response.
 
-## 🔍 Technical Deep Dive
+## 📝 Conclusion
+CogniVision successfully delivers a comprehensive and intelligent assistive mobile application that empowers visually impaired individuals to navigate outdoor environments safely and independently. Through the integration of multiple cutting-edge technologies, the project achieves its core objective of providing real-time obstacle detection, audio-guided navigation, and emergency assistance within a single unified mobile platform.
 
-### 🧠 Vision Pipeline
-Our vision system uses a multi-stage processing pipeline optimized for mobile performance:
-1. **Object Detection**: YOLOv8n (Nano) running on TFLite processes frames in under 50ms, identifying obstacles like 'cars', 'stairs', or 'poles'.
-2. **Face Recognition**: 
-   - **Detection**: Google ML Kit identifies face coordinates.
-   - **Embedding**: Faces are cropped and passed through a **MobileFaceNet** TFLite model to generate a 192-d feature vector.
-   - **Matching**: Cosine similarity is calculated against a local **Hive** database of known contacts.
-3. **Scene Description**: When the user asks "Describe the scene", a high-resolution frame is captured and sent to **Gemini 1.5 Flash** for deep multimodal analysis.
+The application successfully integrates YOLOv8 for real-time object detection, Google Maps API for turn-by-turn audio navigation, and a guardian navigation feature that allows caregivers to remotely monitor and guide users. The IoT hardware layer comprising the ESP32 microcontroller and NEO-6M GPS module ensures precise real-time location tracking, while Firebase Realtime Database maintains seamless data synchronization between the device and the application. Face recognition powered by Google ML Kit and the MobileFaceNet model adds an additional layer of environmental awareness, and the Firebase AI powered voice assistant enables natural and intuitive user interaction.
 
-### 🎙️ Voice & Command Loop
-1. **STT**: `speech_to_text` captures user intent.
-2. **Routing**: `CommandRouter` identifies specific intents (navigation, SOS, vision).
-3. **LLM Reasoning**: If no specific intent is matched, the query is sent to **Gemini Pro** to provide an intelligent conversational response.
-4. **TTS**: `flutter_tts` announces the result with optimized speech rates for accessibility.
-
----
-
-## 🚀 Future Roadmap & Enhancements
-- **Offline YOLO mode**: On-device inference optimization for lower latency and data privacy.
-- **BLE Indoor Navigation**: Integration with BLE beacons for precise positioning inside buildings where GPS fails.
-- **Haptic Wristband Integration**: Translating navigation cues into vibration patterns for noisy environments.
-- **Multi-language TTS support**: Expanding accessibility for non-English speaking users globally.
-- **Fall Detection**: Utilizing IMU sensor data on the ESP32 to detect sudden falls and auto-trigger SOS.
-- **Community Hazard Mapping**: Crowdsourced reporting of sidewalk obstacles, construction, and broken elevators.
-- **Guardian Multi-User Access**: Role-based access for families to monitor a single user simultaneously.
-- **Smart Glass Compatibility**: Optimizing the vision pipeline for heads-up display wearables.
-
----
-
-## 🧪 Testing Coverage
-We enforce a high-quality codebase with automated tests:
-- **Unit Tests**: Coverage for command parsing, bounding box IoU calculations, and similarity thresholds.
-- **Widget Tests**: Verification of critical UI paths like authentication and role selection.
-
-```bash
-cd frontend/gemini_live_app
-flutter test
-```
-
----
-
-## ⚙️ Setup & Deployment
-
-1. **Backend**:
-   - `cd backend`
-   - `npm install`
-   - Configure `.env` with `MONGODB_URI`
-   - `npm start`
-
-2. **Frontend**:
-   - `cd frontend/gemini_live_app`
-   - `flutter pub get`
-   - Create `.env` in `lib/` with `MAPS_API_KEY` and `BACKEND_URL`
-   - `flutter run`
-
----
-
-*Developed with ❤️ by the CogniVision Team for Accessibility Excellence.*
+The key takeaway from this project is that combining artificial intelligence, cloud computing, IoT hardware, and mobile development can produce a meaningful and impactful solution for individuals with visual impairments. CogniVision demonstrates that technology can bridge the gap between disability and independence, offering users the confidence to move freely in public spaces. The project also highlights the importance of designing assistive technology that is accessible, voice-driven, and responsive to real-world environments, setting a strong foundation for future enhancements and broader deployment.
