@@ -111,12 +111,14 @@ Our vision system uses a multi-stage processing pipeline optimized for mobile pe
 ---
 
 ## 🚀 Future Roadmap & Enhancements
-- **Offline VLM (Google Gemma)**: Implementing smaller on-device vision models for basic scene understanding without internet.
-- **LiDAR-Lite Integration**: Enhancing obstacle avoidance with high-precision distance sensors.
-- **Multi-Guardian Dashboard**: Allowing multiple caregivers to monitor a single user with role-based permissions.
-- **Haptic Wristband Support**: Translating navigation cues into vibration patterns for noisy environments.
-- **Indoor Navigation**: Utilizing BLE Beacons and IMU sensor fusion for precise indoor positioning.
-- **Community Hazard Mapping**: Crowdsourced reporting of sidewalk obstacles and construction.
+- **Offline YOLO mode**: On-device inference optimization for lower latency and data privacy.
+- **BLE Indoor Navigation**: Integration with BLE beacons for precise positioning inside buildings where GPS fails.
+- **Haptic Wristband Integration**: Translating navigation cues into vibration patterns for noisy environments.
+- **Multi-language TTS support**: Expanding accessibility for non-English speaking users globally.
+- **Fall Detection**: Utilizing IMU sensor data on the ESP32 to detect sudden falls and auto-trigger SOS.
+- **Community Hazard Mapping**: Crowdsourced reporting of sidewalk obstacles, construction, and broken elevators.
+- **Guardian Multi-User Access**: Role-based access for families to monitor a single user simultaneously.
+- **Smart Glass Compatibility**: Optimizing the vision pipeline for heads-up display wearables.
 
 ---
 
