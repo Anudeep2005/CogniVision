@@ -1,0 +1,22 @@
+{
+    "flutter": {
+        "platforms": {
+            "android": {
+                "default": {
+                    "projectId": "vision-aid-app-b693f",
+                    "appId": "1:364272834994:android:bc2ec43f0c997deca5ecab",
+                    "fileOutput": "android/app/google-services.json"
+                }
+            },
+            "dart": {
+                "lib/firebase_options.dart": {
+                    "projectId": "vision-aid-app-b693f",
+                    "configurations": {
+                        "android": "1:364272834994:android:bc2ec43f0c997deca5ecab",
+                        "ios": "1:364272834994:ios:b7163c0e134ddb2fa5ecab"
+                    }
+                }
+            }
+        }
+    }
+}
