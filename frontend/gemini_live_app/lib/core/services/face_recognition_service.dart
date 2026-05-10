@@ -40,6 +40,17 @@ class FaceRecognitionService {
     _faceBox = await Hive.openBox('known_faces');
 
     _isInitialized = true;
+    await _initMockDatabase();
+  }
+
+  Future<void> _initMockDatabase() async {
+    // Add a test face if the box is empty
+    if (_faceBox.isEmpty) {
+      // 192-d dummy embedding for 'Test User'
+      final dummyEmbedding = List.generate(192, (index) => 0.1 * index / 192);
+      await registerFace('Test User', dummyEmbedding);
+      debugPrint('Mock Face Database Initialized');
+    }
   }
 
   Future<List<Face>> detectFaces(InputImage inputImage) async {
