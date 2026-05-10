@@ -18,7 +18,7 @@ const requireAuth = async (req, res, next) => {
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     const firebaseUid = decodedToken.uid;
 
-    const user = await User.findOne({ firebaseUid });
+    const user = await User.findOne({ userId: firebaseUid });
 
     if (!user) {
       return res.status(404).json({ error: 'User not found in database' });
