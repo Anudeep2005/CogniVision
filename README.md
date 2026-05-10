@@ -66,7 +66,7 @@ graph TD
 | **Face Recognition** | ✅ | ML Kit + MobileFaceNet + Hive in `lib/core/services/face_recognition_service.dart` |
 | **Gemini Vision (Scene Desc)** | ✅ | Multimodal Gemini integration in `lib/core/services/gemini_service.dart` |
 | **Voice Navigation** | ✅ | Google Maps Polyline integration in `lib/core/services/navigation_service.dart` |
-| **Node.js Backend** | ✅ | REST API & Mongoose schemas in `backend/server.js` |
+| **Node.js Backend** | ✅ | REST API & Mongoose schemas in `backend/src/index.js` |
 | **SOS Alert System** | ✅ | End-to-end trigger in `lib/core/services/command_router.dart` |
 | **IoT Firmware** | ✅ | ESP32 + NEO-6M GPS code in `firmware/location.ino` |
 | **Test Suite** | ✅ | Meaningful unit & widget tests in `test/` |
