@@ -6,6 +6,8 @@ import 'package:vision_aid_app/core/services/navigation_service.dart';
 import 'package:vision_aid_app/core/services/api_service.dart';
 import 'package:vision_aid_app/core/services/gemini_service.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:vision_aid_app/providers.dart';
+import 'package:vision_aid_app/features/ai_assistant/vision_provider.dart';
 
 class CommandRouter {
   final Ref ref;
@@ -55,10 +57,14 @@ class CommandRouter {
       await voiceEngine.speak('Switched to Navigation mode. Tell me your destination.');
     } 
     else if (lowerCmd.contains('vision') || lowerCmd.contains('describe')) {
-      ref.read(userModeProvider.notifier).setMode(AppMode.vision);
-      await voiceEngine.speak('Switched to Vision mode. Scanning surroundings.');
-      // Phase 7 Hook: The VisionScreen UI will detect the mode change 
-      // and trigger the periodic scanning or description logic.
+      final currentMode = ref.read(userModeProvider);
+      if (currentMode != AppMode.vision) {
+        ref.read(userModeProvider.notifier).setMode(AppMode.vision);
+        await voiceEngine.speak('Switched to Vision mode.');
+      }
+      
+      // Trigger Gemini Vision Action
+      ref.read(visionActionProvider.notifier).state = VisionAction.describe;
     } 
     else if (lowerCmd.contains('profile')) {
       ref.read(userModeProvider.notifier).setMode(AppMode.profile);
@@ -116,8 +122,8 @@ class CommandRouter {
       final apiService = ApiService();
       await apiService.triggerSos(
         firebaseUid: uid,
-        latitude: position.latitude,
-        longitude: position.longitude,
+        lat: position.latitude,
+        lng: position.longitude,
       );
     } catch (e) {
       debugPrint('Failed to send SOS to backend: $e');
