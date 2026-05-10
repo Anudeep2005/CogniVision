@@ -21,6 +21,26 @@ class GeminiService {
     }
   }
 
+  /// Specialized for conversational voice interaction
+  Future<String> chat(String message) async {
+    try {
+      // Add system context for assistant persona
+      final prompt = "You are CogniVision, a helpful AI assistant for the visually impaired. "
+          "Keep your responses concise, descriptive, and easy to understand via speech. "
+          "User says: $message";
+      return await askGemini(prompt);
+    } catch (e) {
+      return "I'm sorry, I encountered an error during our conversation.";
+    }
+  }
+
+  /// Multimodal analysis for real-time scene understanding
+  Future<String> describeScene(Uint8List imageBytes) async {
+    const prompt = "Describe the scene in front of me clearly and concisely for a visually impaired person. "
+        "Mention any hazards, obstacles, or important objects like doors, stairs, or people.";
+    return await analyzeImage(imageBytes, prompt);
+  }
+
   Future<String> analyzeImage(Uint8List imageBytes, String prompt) async {
     try {
       final content = [
