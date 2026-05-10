@@ -7,14 +7,17 @@ import 'package:vision_aid_app/features/ai_assistant/yolo_detector.dart';
 import 'package:vision_aid_app/core/services/face_recognition_service.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 
-class VisionScreen extends StatefulWidget {
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:vision_aid_app/features/ai_assistant/vision_provider.dart';
+
+class VisionScreen extends ConsumerStatefulWidget {
   const VisionScreen({super.key});
 
   @override
-  State<VisionScreen> createState() => _VisionScreenState();
+  ConsumerState<VisionScreen> createState() => _VisionScreenState();
 }
 
-class _VisionScreenState extends State<VisionScreen> {
+class _VisionScreenState extends ConsumerState<VisionScreen> {
   CameraController? _cameraController;
   final YoloDetector _yoloDetector = YoloDetector();
   bool _isProcessing = false;
@@ -46,6 +49,9 @@ class _VisionScreenState extends State<VisionScreen> {
 
       await _cameraController!.initialize();
       if (!mounted) return;
+
+      // Register controller for global access
+      ref.read(cameraControllerProvider.notifier).state = _cameraController;
 
       setState(() {
         _isCameraReady = true;
@@ -142,11 +148,28 @@ class _VisionScreenState extends State<VisionScreen> {
     _scanTimer?.cancel();
     _cameraController?.dispose();
     _yoloDetector.dispose();
+    // Clear global reference safely
+    Future.microtask(() {
+      if (mounted) {
+        ref.read(cameraControllerProvider.notifier).state = null;
+      }
+    });
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Listen for actions from CommandRouter
+    ref.listen(visionActionProvider, (previous, next) {
+      if (next == VisionAction.describe) {
+        _describeScene();
+        // Reset action after triggering
+        Future.microtask(() {
+           ref.read(visionActionProvider.notifier).state = VisionAction.none;
+        });
+      }
+    });
+
     if (!_isCameraReady || _cameraController == null) {
       return const Scaffold(
         backgroundColor: Colors.black,
