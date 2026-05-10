@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "981337949233",
+    "project_id": "cognivision-66998",
+    "storage_bucket": "cognivision-66998.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:981337949233:android:aedbf852d5eda260540110",
+        "android_client_info": {
+          "package_name": "com.anudeep.vision_aid_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA4rfoZltZbf3DYT3hhwDfryZUK0cGNPQM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
