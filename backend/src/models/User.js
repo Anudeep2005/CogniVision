@@ -11,15 +11,28 @@ const userSchema = new mongoose.Schema({
     required: true,
     enum: ['user', 'guardian'],
   },
-  pairCode: {
+  email: {
     type: String,
     required: true,
+  },
+  displayName: {
+    type: String,
+  },
+  pairCode: {
+    type: String,
     unique: true,
+    sparse: true,
   },
   pairedWith: {
-    type: String,
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
     default: null,
   },
+  lastLocation: {
+    lat: Number,
+    lng: Number,
+    timestamp: Date
+  }
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

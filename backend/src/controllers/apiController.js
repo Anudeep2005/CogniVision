@@ -4,7 +4,7 @@ const Alert = require('../models/Alert');
 const crypto = require('crypto');
 
 exports.registerUser = async (req, res) => {
-  const { firebaseUid, role } = req.body;
+  const { firebaseUid, email, displayName, role } = req.body;
   
   try {
     let user = await User.findOne({ userId: firebaseUid });
@@ -12,13 +12,16 @@ exports.registerUser = async (req, res) => {
       return res.status(200).json(user);
     }
 
-    const pairCode = crypto.randomBytes(4).toString('hex').toUpperCase();
-
     user = new User({
       userId: firebaseUid,
-      role: role,
-      pairCode: pairCode
+      email: email,
+      displayName: displayName,
+      role: role
     });
+
+    if (role === 'user') {
+      user.pairCode = crypto.randomBytes(3).toString('hex').toUpperCase();
+    }
 
     await user.save();
     res.status(201).json(user);
