@@ -5,10 +5,10 @@ class VoiceScreen extends StatefulWidget {
   const VoiceScreen({super.key});
 
   @override
-  _VoiceScreenState createState() => _VoiceScreenState();
+  VoiceScreenState createState() => VoiceScreenState();
 }
 
-class _VoiceScreenState extends State<VoiceScreen> with SingleTickerProviderStateMixin {
+class VoiceScreenState extends State<VoiceScreen> with SingleTickerProviderStateMixin {
   final VoiceService _voiceService = VoiceService();
   String _displayWords = "say 'Home' or 'Settings'";
   bool _isListening = false;
