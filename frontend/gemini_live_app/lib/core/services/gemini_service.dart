@@ -46,7 +46,7 @@ class GeminiService {
       final content = [
         Content.multi([
           TextPart(prompt),
-          DataPart('image/jpeg', imageBytes),
+          InlineDataPart('image/jpeg', imageBytes),
         ])
       ];
       final response = await _model.generateContent(content);

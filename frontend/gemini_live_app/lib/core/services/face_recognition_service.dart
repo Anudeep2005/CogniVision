@@ -61,9 +61,9 @@ class FaceRecognitionService {
     for (int y = 0; y < 112; y++) {
       for (int x = 0; x < 112; x++) {
         var pixel = resizedImage.getPixel(x, y);
-        buffer[pixelIndex++] = (img.getRed(pixel) - 127.5) / 128.0;
-        buffer[pixelIndex++] = (img.getGreen(pixel) - 127.5) / 128.0;
-        buffer[pixelIndex++] = (img.getBlue(pixel) - 127.5) / 128.0;
+        buffer[pixelIndex++] = (pixel.r - 127.5) / 128.0;
+        buffer[pixelIndex++] = (pixel.g - 127.5) / 128.0;
+        buffer[pixelIndex++] = (pixel.b - 127.5) / 128.0;
       }
     }
 
