@@ -148,7 +148,21 @@ class NavigationService {
       currentStep.endLocation.latitude, currentStep.endLocation.longitude,
     );
 
-    // If within 15 meters of the turn coordinate, read the next step
+    // 0. Sync with backend for guardian tracking
+    try {
+       socketService.sendLocationUpdate(routeState.userId ?? 'unknown', currentPosition.latitude, currentPosition.longitude);
+       // Also sync via REST for history/persistence
+       final apiService = ApiService();
+       apiService.updateLocation(
+         firebaseUid: routeState.userId ?? 'unknown', 
+         lat: currentPosition.latitude, 
+         lng: currentPosition.longitude
+       );
+    } catch (e) {
+      debugPrint('Tracking sync error: $e');
+    }
+
+    // 1. If within 15 meters of the turn coordinate, read the next step
     if (distance <= 15.0) { 
       if (routeState.currentStepIndex == routeState.steps.length - 1) {
         await voiceEngine.speak("You have arrived at your destination.");
