@@ -74,6 +74,13 @@ class VoiceEngine {
       listenMode: ListenMode.confirmation,
     );
   }
+
+  bool get isListening => _speechToText.isListening;
+
+  void dispose() {
+    _flutterTts.stop();
+    _speechToText.stop();
+  }
 }
 
 final voiceEngine = VoiceEngine();
