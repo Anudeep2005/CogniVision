@@ -43,3 +43,14 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Backend / Node.js
+**/node_modules/
+**/node_modules
+backend/.env
+backend/dist/
+backend/npm-debug.log*
+
+# Global build folders
+**/build/
+**/.dart_tool/
