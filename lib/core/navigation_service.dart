@@ -46,7 +46,7 @@ class NavigationService {
       
       // 2. Fetch Directions
       final url = Uri.parse(
-        'https://maps.googleapis.com/maps/api/directions/json?origin=${position.latitude},${position.longitude}&destination=$destination&mode=walking&key=$apiKey'
+        'https://maps.googleapis.com/maps/api/directions/json?origin=${position.latitude},${position.longitude}&destination=${Uri.encodeComponent(destination)}&mode=walking&key=$apiKey'
       );
 
       final response = await http.get(url);
