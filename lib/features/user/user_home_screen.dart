@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:volume_controller/volume_controller.dart';
+
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'user_provider.dart';
@@ -99,17 +99,15 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
 
   Future<void> _initVoiceSystem() async {
     await voiceEngine.init();
-    await voiceEngine.speak("Cognivision active. Press any volume button to give a command.");
-
-    // Listen to hardware volume button presses
-    VolumeController.instance.addListener((volume) {
-      // Whenever volume changes (button pressed), we trigger the assistant
-      _triggerAssistant();
-    });
+    await voiceEngine.speak("Cognivision active. Tap anywhere on the screen to give a command.");
   }
 
   Future<void> _triggerAssistant() async {
-    if (_isListening) return;
+    if (_isListening) {
+      await voiceEngine.stopListening();
+      setState(() => _isListening = false);
+      return;
+    }
 
     setState(() {
       _isListening = true;
@@ -143,7 +141,6 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
   void dispose() {
     // Clean up
     _positionStreamSubscription?.cancel();
-    VolumeController.instance.removeListener();
     voiceEngine.stopSpeaking();
     super.dispose();
   }
@@ -181,7 +178,10 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
     }
 
     return Scaffold(
-      body: Stack(
+      body: GestureDetector(
+        onTap: _triggerAssistant,
+        behavior: HitTestBehavior.opaque,
+        child: Stack(
         children: [
           GoogleMap(
             initialCameraPosition: initialCameraPosition,
@@ -339,6 +339,7 @@ class _UserHomeScreenState extends ConsumerState<UserHomeScreen> {
               ),
             ),
         ],
+      ),
       ),
     );
   }

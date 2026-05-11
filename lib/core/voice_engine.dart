@@ -47,6 +47,12 @@ class VoiceEngine {
     await _flutterTts.stop();
   }
 
+  Future<void> stopListening() async {
+    if (_speechToText.isListening) {
+      await _speechToText.stop();
+    }
+  }
+
   Future<void> listen(Function(String) onResult) async {
     if (!_isInitialized) {
       await speak("Speech recognition is not available. Please check permissions.");
@@ -68,10 +74,12 @@ class VoiceEngine {
         }
       },
       listenFor: const Duration(seconds: 10),
-      pauseFor: const Duration(milliseconds: 1500),
-      partialResults: false,
-      cancelOnError: true,
-      listenMode: ListenMode.confirmation,
+      pauseFor: const Duration(milliseconds: 500), // Reduced to 500ms for drastically faster response
+      listenOptions: SpeechListenOptions(
+        partialResults: false,
+        cancelOnError: true,
+        listenMode: ListenMode.dictation, // Faster than confirmation mode
+      ),
     );
   }
 }

@@ -50,16 +50,7 @@ class CommandRouter {
     if (lowerCmd.contains('navigation') || lowerCmd.contains('navigate')) {
       ref.read(userModeProvider.notifier).setMode(AppMode.navigation);
       await voiceEngine.speak('Switched to Navigation mode. Tell me your destination.');
-    } 
-    else if (lowerCmd.contains('vision') || lowerCmd.contains('describe')) {
-      ref.read(userModeProvider.notifier).setMode(AppMode.vision);
-      await voiceEngine.speak('Switched to Vision mode. Scanning surroundings.');
-      // Phase 7: Trigger Gemini/Gemma Vision here
-    } 
-    else if (lowerCmd.contains('profile')) {
-      ref.read(userModeProvider.notifier).setMode(AppMode.profile);
-      await voiceEngine.speak('Profile mode. Your pair code is A B C D 1 2 3 4.');
-    } 
+    }
     else if (lowerCmd.contains('alert guardian') || lowerCmd.contains('help') || lowerCmd.contains('sos')) {
       await _triggerSOS();
     } 
