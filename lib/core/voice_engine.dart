@@ -73,12 +73,12 @@ class VoiceEngine {
           onResult(result.recognizedWords);
         }
       },
-      listenFor: const Duration(seconds: 10),
-      pauseFor: const Duration(milliseconds: 500), // Reduced to 500ms for drastically faster response
+      listenFor: const Duration(seconds: 15),
+      pauseFor: const Duration(seconds: 3), // 3 seconds gives plenty of time; the user can still tap the screen to stop instantly
       listenOptions: SpeechListenOptions(
-        partialResults: false,
+        partialResults: true, // Capturing partial results keeps the engine from prematurely throwing error_no_match
         cancelOnError: true,
-        listenMode: ListenMode.dictation, // Faster than confirmation mode
+        listenMode: ListenMode.deviceDefault, // Most stable across different Android devices
       ),
     );
   }
