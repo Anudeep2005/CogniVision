@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'features/role_selection_screen.dart';
+import 'features/user/user_home_screen.dart';
 import 'core/app_colors.dart';
 
 void main() async {
@@ -34,7 +34,7 @@ class MyApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const RoleSelectionScreen(),
+      home: const UserHomeScreen(),
     );
   }
 }
