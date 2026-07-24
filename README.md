@@ -1,72 +1,73 @@
-# CogniVision — Vision Aid App
+# CogniVision — AI-Powered Vision Aid App
 
-> An AI-powered assistive application for visually impaired users, combining real-time voice interaction, GPS navigation, face recognition, and object detection in a single Flutter app.
+> A fully voice-navigable Flutter mobile application for visually impaired users, combining real-time Gemini 2.0 Live AI assistance, on-device YOLOv8n object detection, offline face recognition with MobileFaceNet, and GPS walking navigation — all in one app, controllable entirely by voice.
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
+- [Problem Statement](#problem-statement)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Setup & Installation](#setup--installation)
-  - [1. Clone the Repository](#1-clone-the-repository)
-  - [2. Flutter App Setup](#2-flutter-app-setup)
-  - [3. Backend Server Setup](#3-backend-server-setup)
-  - [4. Firebase Setup](#4-firebase-setup)
-  - [5. Environment Variables](#5-environment-variables)
 - [Running the App](#running-the-app)
 - [Backend API Reference](#backend-api-reference)
 - [Key Dependencies](#key-dependencies)
 - [Known Issues & Notes](#known-issues--notes)
+- [Future Enhancements](#future-enhancements)
 - [Contributing](#contributing)
 
 ---
 
-## Overview
+## Problem Statement
 
-CogniVision is a Flutter-based assistive app built for visually impaired users. It integrates three core modules accessible from a persistent bottom navigation bar:
-
-| Tab | Name | Purpose |
-|-----|------|---------|
-| 1 | **Vertex AI** | Gemini 2.0 Live API — real-time voice + camera assistant |
-| 2 | **GPS** | Voice-commanded walking navigation with turn-by-turn audio |
-| 3 | **Face** | On-device face registration and recognition using MobileFaceNet |
-
-The entire app is voice-navigable — users can switch tabs, trigger SOS alerts, and issue navigation commands by speaking.
+Visually impaired individuals must juggle multiple fragmented apps to navigate, identify people, and understand their surroundings — all without reliable vision. CogniVision solves this by combining Gemini Live AI, GPS turn-by-turn navigation, and on-device face recognition into a single, fully voice-controlled app. No screen interaction is required.
 
 ---
 
 ## Features
 
-### Vertex AI (Gemini Live)
-- Real-time two-way audio conversation with Gemini 2.0 Flash
-- Live camera feed streamed to Gemini for visual scene description
-- YOLOv8n on-device object detection with spoken announcements (positions objects as "ahead / left / right")
-- Session watchdog auto-restarts stale Gemini connections
-- Audio plays through the device speaker (not earpiece)
+### 1. Vertex AI Tab — Gemini 2.0 Live Assistant
+- **Real-time two-way audio** with Gemini 2.0 Flash via Firebase AI Live API
+- **Live camera stream** (JPEG frames) sent to Gemini for visual scene description
+- **PCM microphone capture** piped directly to Gemini; Gemini audio response played via SoLoud (low-latency PCM playback, not earpiece)
+- **YOLOv8n on-device object detection** — 640×640 TFLite inference with full preprocessing, output tensor parsing, NMS (IoU 0.45), confidence threshold 0.45, top-5 results announced by relative position ("person ahead", "chair to the left")
+- **Session watchdog** auto-restarts stale Gemini connections
+- Microphone handed back to the global VoiceService when tab is inactive
 
-### GPS Navigation
-- Voice-triggered destination search ("navigate to Apollo Hospital")
-- Walking route via Google Directions API with polyline overlay on Google Maps
-- Live turn-by-turn audio instructions as the user walks
-- Real-time location tracking broadcast to guardian via Socket.IO
-- SOS voice command instantly alerts the linked guardian
+### 2. GPS Navigation Tab
+- **Voice-triggered destination** — say "navigate to Apollo Hospital" and the route is fetched
+- **Google Directions API** (walking mode) called from current GPS fix via `geolocator`
+- **Polyline overlay** on Google Maps with route bounds auto-fitted to camera
+- **Turn-by-turn TTS** — HTML instructions stripped via `html` package; next step announced when within **15 metres** of the manoeuvre point
+- **Arrival detection** — "You have arrived at your destination" spoken on reaching the last waypoint
+- **Real-time location broadcast** to linked guardian via Socket.IO `LOCATION_UPDATE` event
+- **SOS voice command** emits `SOS_ALERT` via Socket.IO to the guardian's room instantly
 
-### Face Recognition
-- Uses the **back camera** so blind users can point it at people in front of them
-- Registers faces with name + MobileFaceNet 192-d embedding stored in Hive (on-device)
-- Cosine similarity matching (threshold ≥ 0.75) with confidence percentage
-- Auto-scan mode continuously checks for faces every 300 ms
-- Works fully offline — no server required for recognition
+### 3. Face Recognition Tab
+- **Back camera** used intentionally — blind users point the phone at the person in front
+- **Google ML Kit** detects face bounding boxes per frame
+- **MobileFaceNet TFLite** (`[1, 112, 112, 3]` input → `[1, 192]` output) extracts L2-normalised 192-d embeddings
+- **Cosine similarity matching** against Hive-stored embeddings; threshold ≥ **0.75** = confirmed match
+- **Registration** — name + UUID + embedding stored on-device in Hive
+- **Auto-scan mode** continuously recognises every 300 ms
+- **Fully offline** — zero network calls for recognition after first model download (~2 MB)
+- Registered faces list with delete and clear-all options
 
-### Authentication
-- Firebase Auth (email + password)
-- Two roles: **User** (visually impaired person) and **Guardian** (caregiver)
-- Role stored in MongoDB via a Node.js/Express backend
-- Guardian dashboard shows real-time user location via Socket.IO
+### 4. Voice Command System (Global)
+- Single `VoiceService` singleton using `speech_to_text`
+- Tab switching by spoken keyword: *"vertex / AI / assistant"* → tab 0 · *"GPS / navigate"* → tab 1 · *"face / recognition"* → tab 2
+- Haptic feedback on microphone activation
+- Microphone arbitration prevents conflict with Gemini Live session
+
+### 5. Authentication & Roles
+- **Firebase Auth** (email + password) — `login_screen.dart`
+- Two roles: **user** (visually impaired person) and **guardian** (caregiver)
+- Role stored in MongoDB via `POST /api/auth/register`; retrieved via `GET /api/auth/me`
+- Firebase ID token verified server-side by `requireAuth` middleware
+- Guardian dashboard receives real-time location + SOS via Socket.IO
 
 ---
 
@@ -74,7 +75,7 @@ The entire app is voice-navigable — users can switch tabs, trigger SOS alerts,
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Flutter App                       │
+│                Flutter Mobile App                   │
 │                                                     │
 │  ┌──────────┐  ┌──────────────┐  ┌───────────────┐ │
 │  │ Vertex   │  │  GPS / Maps  │  │     Face      │ │
@@ -85,15 +86,16 @@ The entire app is voice-navigable — users can switch tabs, trigger SOS alerts,
 │  │ YOLOv8n  │  │ Geolocator   │  │ Google ML Kit │ │
 │  └──────────┘  └──────────────┘  └───────────────┘ │
 │                                                     │
-│         Global Voice Service (speech_to_text)       │
-│         Global TTS Service    (flutter_tts)         │
+│   Global VoiceService (speech_to_text + flutter_tts)│
+│   Riverpod State Management                         │
+│   Hive On-Device Face Storage                       │
 └───────────────────────┬─────────────────────────────┘
-                        │ HTTP / WebSocket
+                        │ HTTP REST + WebSocket (Socket.IO)
           ┌─────────────┴──────────────┐
           │     Node.js Backend        │
           │  Express + Socket.IO       │
           │  Firebase Admin SDK        │
-          │  MongoDB (Mongoose)        │
+          │  MongoDB via Mongoose      │
           └────────────────────────────┘
 ```
 
@@ -102,82 +104,81 @@ The entire app is voice-navigable — users can switch tabs, trigger SOS alerts,
 ## Project Structure
 
 ```
-vision_aid_app/
-├── lib/
+CogniVision/
+├── backend/                          # Node.js backend server
 │   └── src/
-│       ├── face_features/           # Face recognition module
-│       │   ├── camera_service.dart      # Back-camera capture + ML Kit face detection
-│       │   ├── face_embedding_service.dart  # MobileFaceNet TFLite inference
-│       │   ├── face_storage_service.dart    # Hive persistence + cosine matching
-│       │   ├── home_screen.dart
-│       │   ├── register_screen.dart
-│       │   ├── recognize_screen.dart
-│       │   ├── registered_faces_screen.dart
-│       │   ├── registered_face.dart         # Hive model
-│       │   └── registered_face.g.dart       # Generated adapter
-│       │
-│       ├── gps_features/
-│       │   └── user/
-│       │       ├── user_home_screen.dart    # Google Maps + live navigation UI
-│       │       └── user_provider.dart       # Riverpod state (RouteState, AppMode)
-│       │
-│       ├── gps_core/
-│       │   ├── navigation_service.dart  # Google Directions API + turn-by-turn logic
-│       │   ├── command_router.dart      # Maps voice commands → navigation actions
-│       │   └── socket_service.dart      # Socket.IO client (location + SOS)
-│       │
-│       ├── services/
-│       │   ├── global_voice_service.dart  # STT + tab-switching voice commands
-│       │   ├── tts_service.dart           # flutter_tts wrapper for YOLO announcements
-│       │   └── api_service.dart           # HTTP client for backend auth
-│       │
-│       ├── utilities/
-│       │   ├── audio_input.dart       # PCM mic recording stream
-│       │   ├── audio_output.dart      # SoLoud PCM playback for Gemini audio
-│       │   ├── video_input.dart       # Camera → JPEG stream for Gemini
-│       │   └── yolo_detector.dart     # YOLOv8n TFLite inference + NMS
-│       │
-│       ├── ui_components/
-│       │   ├── luxury_background.dart
-│       │   ├── bottom_bar.dart
-│       │   ├── branding.dart
-│       │   ├── camera_previews.dart
-│       │   ├── sound_waves.dart
-│       │   ├── theme.dart
-│       │   ├── vertical_switch.dart
-│       │   └── ui_components.dart     # Barrel export
-│       │
-│       ├── screens/
-│       │   ├── main_navigation_wrapper.dart  # Bottom nav + mic FAB
-│       │   ├── login_screen.dart
-│       │   ├── guardian_screen.dart
-│       │   └── placeholder_screens.dart
-│       │
-│       ├── flutterfire_ai_live_api_demo.dart  # Gemini Live session orchestrator
-│       ├── providers.dart                      # Riverpod global providers
-│       └── firebase_options.dart               # Generated by FlutterFire CLI
+│       ├── config/
+│       │   ├── db.js                 # MongoDB/Mongoose connection
+│       │   └── firebase.js           # Firebase Admin SDK init
+│       ├── middleware/
+│       │   ├── requireAuth.js        # Firebase ID token verifier
+│       │   └── requireRole.js        # Role-based access guard
+│       ├── models/
+│       │   └── User.js               # Mongoose user schema (firebaseUid, role, email)
+│       ├── routes/
+│       │   └── auth.js               # POST /register · GET /me
+│       └── index.js                  # Express + Socket.IO server entry
 │
-├── assets/
-│   └── models/
-│       ├── yolov8n.tflite   # YOLOv8 nano model
-│       └── yolov8n.txt      # COCO class labels
-│
-├── backend/                 # Node.js server
-│   ├── config/
-│   │   ├── db.js            # MongoDB connection
-│   │   └── firebase.js      # Firebase Admin init
-│   ├── middleware/
-│   │   ├── requireAuth.js   # Firebase token verification
-│   │   └── requireRole.js   # Role-based access guard
-│   ├── models/
-│   │   └── User.js          # Mongoose user schema
-│   ├── routes/
-│   │   └── auth.js          # POST /register, GET /me
-│   └── index.js             # Express + Socket.IO entry point
-│
-├── .env                     # Environment variables (not committed)
-├── firebase.json
-└── pubspec.yaml
+└── frontend/gemini_live_app/
+    ├── assets/models/
+    │   ├── yolov8n.tflite            # YOLOv8 nano model (bundled)
+    │   └── yolov8n.txt               # COCO class labels
+    ├── lib/
+    │   ├── main.dart                 # App entry: Firebase, Hive, Riverpod init
+    │   ├── firebase_options.dart     # Generated by FlutterFire CLI
+    │   └── src/
+    │       ├── flutterfire_ai_live_api_demo.dart  # Gemini Live session orchestrator
+    │       ├── providers.dart                      # Riverpod global providers
+    │       │
+    │       ├── face_features/                      # Face recognition module
+    │       │   ├── camera_service.dart             # Back camera + ML Kit face detection
+    │       │   ├── face_embedding_service.dart     # MobileFaceNet TFLite (download + inference)
+    │       │   ├── face_storage_service.dart       # Hive CRUD + cosine similarity matching
+    │       │   ├── registered_face.dart            # Hive model (id, name, embedding, timestamp)
+    │       │   ├── registered_face.g.dart          # Generated Hive adapter
+    │       │   ├── home_screen.dart
+    │       │   ├── register_screen.dart
+    │       │   ├── recognize_screen.dart           # Auto-scan loop (300 ms)
+    │       │   └── registered_faces_screen.dart
+    │       │
+    │       ├── gps_core/                           # GPS plumbing
+    │       │   ├── navigation_service.dart         # Directions API + turn-by-turn logic
+    │       │   ├── command_router.dart             # Voice → navigation command mapping
+    │       │   └── socket_service.dart             # Socket.IO singleton (location + SOS)
+    │       │
+    │       ├── gps_features/user/
+    │       │   ├── user_home_screen.dart           # Google Maps UI + navigation controls
+    │       │   └── user_provider.dart              # Riverpod RouteState / AppMode
+    │       │
+    │       ├── services/
+    │       │   ├── global_voice_service.dart       # STT singleton + tab-switch commands
+    │       │   ├── tts_service.dart                # flutter_tts wrapper
+    │       │   └── api_service.dart                # HTTP client for backend auth
+    │       │
+    │       ├── utilities/
+    │       │   ├── yolo_detector.dart              # YOLOv8n TFLite: preprocess → infer → NMS
+    │       │   ├── audio_input.dart                # PCM mic capture stream for Gemini
+    │       │   ├── audio_output.dart               # SoLoud PCM playback for Gemini responses
+    │       │   └── video_input.dart                # Camera → JPEG stream for Gemini
+    │       │
+    │       ├── screens/
+    │       │   ├── main_navigation_wrapper.dart    # Bottom nav bar + mic FAB
+    │       │   ├── login_screen.dart               # Firebase email/password auth
+    │       │   ├── guardian_screen.dart            # Guardian real-time location view
+    │       │   └── placeholder_screens.dart
+    │       │
+    │       └── ui_components/                      # Shared widgets
+    │           ├── bottom_bar.dart
+    │           ├── branding.dart
+    │           ├── camera_previews.dart
+    │           ├── luxury_background.dart
+    │           ├── sound_waves.dart
+    │           ├── theme.dart
+    │           ├── vertical_switch.dart
+    │           └── ui_components.dart              # Barrel export
+    │
+    ├── pubspec.yaml
+    └── firebase.json
 ```
 
 ---
@@ -190,8 +191,8 @@ vision_aid_app/
 | Dart SDK | ≥ 3.4.0 |
 | Node.js | ≥ 18.x |
 | MongoDB | Local or Atlas cluster |
-| Firebase project | With Auth + Vertex AI enabled |
-| Google Cloud | Maps SDK + Directions API enabled |
+| Firebase project | Auth + Vertex AI in Firebase enabled |
+| Google Cloud | Maps SDK for Android/iOS + Directions API enabled |
 
 ---
 
@@ -207,37 +208,32 @@ cd cognivision
 ### 2. Flutter App Setup
 
 ```bash
-# Install Flutter dependencies
+cd frontend/gemini_live_app
 flutter pub get
 
-# Generate Hive type adapters (run this whenever registered_face.dart changes)
+# Generate Hive type adapters (re-run if registered_face.dart changes)
 dart run build_runner build --delete-conflicting-outputs
 ```
 
-Download the MobileFaceNet model and place it in the project:
-
-```bash
-# The app auto-downloads it on first launch, but you can pre-cache it:
-# https://github.com/ngtrphuong/facerecognition/raw/main/assets/mobilefacenet.tflite
-```
-
-YOLOv8n model must be manually placed:
+The **YOLOv8n model** must be placed manually before building:
 
 ```
 assets/models/yolov8n.tflite
 assets/models/yolov8n.txt
 ```
 
-You can download the official nano model from [Ultralytics](https://github.com/ultralytics/ultralytics) and export it to TFLite format.
+Download the official nano model from [Ultralytics](https://github.com/ultralytics/ultralytics) and export it to TFLite format.
 
-### 3. Backend Server Setup
+The **MobileFaceNet model** (~2 MB) is downloaded automatically from GitHub on the first launch of the Face tab.
+
+### 3. Backend Setup
 
 ```bash
 cd backend
 npm install
 ```
 
-Create a `.env` file in the `backend/` folder:
+Create `backend/.env`:
 
 ```env
 PORT=3000
@@ -247,12 +243,12 @@ FIREBASE_CLIENT_EMAIL=your-service-account@your-project.iam.gserviceaccount.com
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
 
-> The Firebase service account credentials come from **Firebase Console → Project Settings → Service Accounts → Generate new private key**.
+> Get the service account credentials from **Firebase Console → Project Settings → Service Accounts → Generate new private key**.
 
 Start the server:
 
 ```bash
-node index.js
+npm start
 # Server running on port 3000
 ```
 
@@ -260,8 +256,8 @@ node index.js
 
 1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com)
 2. Enable **Authentication → Email/Password**
-3. Enable **Vertex AI in Firebase** (for Gemini Live API access)
-4. Run FlutterFire CLI to regenerate `firebase_options.dart` for your project:
+3. Enable **Vertex AI in Firebase** (required for Gemini Live API)
+4. Run FlutterFire CLI to regenerate `firebase_options.dart`:
 
 ```bash
 dart pub global activate flutterfire_cli
@@ -270,17 +266,15 @@ flutterfire configure
 
 5. Place `google-services.json` in `android/app/` and `GoogleService-Info.plist` in `ios/Runner/`.
 
-### 5. Environment Variables
+### 5. Environment Variables (Flutter)
 
-Create a `.env` file in the **Flutter project root** (next to `pubspec.yaml`):
+Create `.env` in `frontend/gemini_live_app/` (next to `pubspec.yaml`):
 
 ```env
 GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 ```
 
-> **Never commit `.env` or any file containing API keys.** The `.gitignore` already excludes secret files, but double-check before pushing.
-
-Also update the hardcoded backend IP in the Flutter source to point to your server:
+Update the hardcoded backend IP in the Flutter source:
 
 ```dart
 // lib/src/services/api_service.dart
@@ -295,16 +289,14 @@ socket = IO.io('http://YOUR_SERVER_IP:3000', ...);
 ## Running the App
 
 ```bash
-# Run on a connected Android or iOS device
+# Physical device required — camera/mic/GPS don't work in emulator
 flutter run
 
-# Run with verbose logging (useful for Gemini session debugging)
+# Verbose logging (useful for Gemini session debugging)
 flutter run -v
 ```
 
-> The app requires a **physical device** — camera, microphone, and GPS do not work in the emulator.
-
-#### Android permissions required (`AndroidManifest.xml`)
+### Android permissions (`AndroidManifest.xml`)
 
 ```xml
 <uses-permission android:name="android.permission.CAMERA" />
@@ -314,7 +306,7 @@ flutter run -v
 <uses-permission android:name="android.permission.INTERNET" />
 ```
 
-#### iOS permissions required (`Info.plist`)
+### iOS permissions (`Info.plist`)
 
 ```xml
 <key>NSCameraUsageDescription</key>
@@ -333,9 +325,9 @@ Base URL: `http://your-server:3000`
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| `GET` | `/health` | None | Server health check |
-| `POST` | `/api/auth/register` | None | Register a new user |
-| `GET` | `/api/auth/me` | Bearer token | Get current user profile |
+| `GET` | `/health` | None | Liveness check |
+| `POST` | `/api/auth/register` | None | Register new user with role |
+| `GET` | `/api/auth/me` | Bearer token | Get authenticated user profile |
 
 **POST `/api/auth/register`**
 
@@ -375,34 +367,52 @@ Response `201`:
 
 | Package | Purpose |
 |---------|---------|
-| `firebase_ai` | Gemini 2.0 Live API (Vertex AI) |
-| `firebase_auth` | Email/password authentication |
-| `flutter_riverpod` | State management |
-| `record` | PCM microphone stream for Gemini |
-| `flutter_soloud` | Low-latency PCM audio playback for Gemini responses |
-| `speech_to_text` | Voice command recognition |
-| `flutter_tts` | Text-to-speech for navigation and YOLO announcements |
-| `google_maps_flutter` | Map display and route polyline |
-| `geolocator` | Real-time GPS position stream |
-| `flutter_polyline_points` | Decodes Google Directions polyline |
-| `google_mlkit_face_detection` | On-device face bounding box detection |
-| `tflite_flutter` | Runs MobileFaceNet + YOLOv8n on-device |
-| `hive` / `hive_flutter` | Local face embedding storage |
-| `socket_io_client` | Real-time location + SOS with the backend |
-| `camera` | Camera stream for Gemini and YOLO |
-| `flutter_dotenv` | Loads `.env` at runtime |
+| `firebase_ai ^2.2.0` | Gemini 2.0 Live API (Vertex AI in Firebase) |
+| `firebase_auth ^5.5.0` | Email/password authentication |
+| `firebase_core ^3.10.1` | Firebase core initialisation |
+| `flutter_riverpod ^2.6.1` | Reactive state management |
+| `tflite_flutter ^0.12.1` | On-device TFLite inference (YOLOv8n + MobileFaceNet) |
+| `google_mlkit_face_detection ^0.10.0` | On-device face bounding box detection |
+| `hive ^2.2.3` / `hive_flutter ^1.1.0` | On-device face embedding persistence |
+| `record ^6.0.0` | PCM microphone stream for Gemini |
+| `flutter_soloud ^3.2.2` | Low-latency PCM audio playback for Gemini responses |
+| `speech_to_text ^7.3.0` | Voice command recognition (STT) |
+| `flutter_tts ^4.0.2` | Text-to-speech for navigation + YOLO announcements |
+| `google_maps_flutter ^2.14.0` | Map display and route polyline |
+| `geolocator ^14.0.2` | Real-time GPS position stream |
+| `flutter_polyline_points ^3.1.0` | Decodes Google Directions polyline |
+| `socket_io_client ^3.1.4` | Real-time location and SOS with backend |
+| `camera ^0.11.0+2` | Camera stream for Gemini and YOLO |
+| `flutter_dotenv ^6.0.1` | `.env` file at runtime |
+| `image ^4.2.0` | JPEG decode + resize for YOLO preprocessing |
+| `html ^0.15.6` | Strips HTML tags from Google Directions instructions |
 
 ---
 
 ## Known Issues & Notes
 
-- **MobileFaceNet model** (~2 MB) is downloaded automatically on first launch of the Face tab. Ensure internet access on first run.
-- **YOLOv8n assets** must be manually placed in `assets/models/` before building — they are not auto-downloaded.
-- The backend IP addresses (`10.70.4.162`) in `api_service.dart` and `socket_service.dart` are hardcoded for local network use. Replace with your production server URL before deploying.
-- Gemini Live API (`gemini-2.0-flash-exp`) requires Vertex AI to be enabled in your Firebase project and may incur Google Cloud costs.
-- The Google Maps API key must have **Maps SDK for Android/iOS** and **Directions API** enabled in Google Cloud Console.
-- Face recognition uses the **back camera** — the app is designed for blind users pointing their phone at other people, not at themselves.
-- On-device STT (`speech_to_text`) requires an active internet connection on most Android devices unless the on-device language pack is installed.
+- **MobileFaceNet model** (~2 MB) is downloaded on first Face tab launch. Ensure internet on first run.
+- **YOLOv8n assets** must be manually placed in `assets/models/` before building — not auto-downloaded.
+- **Backend IP** in `api_service.dart` and `socket_service.dart` is hardcoded to a local network IP (`10.70.4.162`). Replace with your server URL before deploying.
+- **Gemini Live API** (`gemini-2.0-flash-exp`) requires Vertex AI enabled in Firebase and may incur Google Cloud costs.
+- **Google Maps API key** must have Maps SDK for Android/iOS and Directions API enabled.
+- **Physical device required** — camera, microphone, and GPS do not function in emulators.
+- **STT** (`speech_to_text`) may require internet on Android unless the on-device language pack is installed.
+- **Socket.IO** is not included in the backend `package.json` by default — add `socket.io` as a dependency if the package.json has not been updated.
+
+---
+
+## Future Enhancements
+
+1. **Cloud face backup** — `FaceStorageService` (`lib/src/face_features/face_storage_service.dart`) is isolated behind a clean interface; swapping Hive for Firestore/S3 requires changes only in this one file.
+
+2. **Multi-language TTS/STT** — `VoiceService` and `TtsService` are decoupled via a listener pattern; locale parameterisation requires changes only in `global_voice_service.dart` and `tts_service.dart`.
+
+3. **Depth-based obstacle distance** — `YoloDetector` already returns normalised bounding boxes; a MiDaS TFLite model can be added alongside the existing pipeline consuming the same JPEG stream from `video_input.dart`.
+
+4. **SOS event history** — The Socket.IO relay and Mongoose `User` model are in place; adding an `SosEvent` schema and REST endpoint requires only a new model and route file on the backend.
+
+5. **Wearable / IoT integration** — `backend/core/location_service/location_service.ino` (Arduino sketch in the repo) demonstrates embedded hardware intent; the Socket.IO server already handles `LOCATION_UPDATE` from any authenticated client, so a wearable integrates without server changes.
 
 ---
 
@@ -410,11 +420,11 @@ Response `201`:
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Commit your changes: `git commit -m "feat: describe your change"`
-4. Push to the branch: `git push origin feature/your-feature`
+3. Commit: `git commit -m "feat: describe your change"`
+4. Push: `git push origin feature/your-feature`
 5. Open a Pull Request
 
-Please make sure to run `flutter analyze` and `flutter test` before submitting a PR.
+Run `flutter analyze` and `flutter test` before submitting.
 
 ---
 
