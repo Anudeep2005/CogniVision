@@ -1,13 +1,12 @@
 import 'dart:developer';
-import 'dart:typed_data';
-import 'package:camera/camera.dart';
-import 'package:flutter/material.dart';
 import 'dart:async';
+import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 
 class VideoInput extends ChangeNotifier {
   late List<CameraDescription> _cameras;
-  late CameraController _cameraController;
+  CameraController? _cameraController;
 
   StreamController<Uint8List>? _imageStreamController;
 
@@ -19,32 +18,50 @@ class VideoInput extends ChangeNotifier {
   int _lastFrameTime = 0;
 
   Future<void> init() async {
+    // Idempotent: only initialize once; call dispose() first to reinitialize.
+    if (_initialized) return;
     try {
       _cameras = await availableCameras();
 
       _cameraController = CameraController(
         _cameras[0],
-        ResolutionPreset.low,
+        ResolutionPreset.medium, // medium gives better inference quality than low
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
 
-      await _cameraController.initialize();
+      await _cameraController!.initialize();
       _initialized = true;
       notifyListeners();
+      log('[VideoInput] Camera initialized: ${_cameras[0].name}');
     } catch (e) {
-      log("Camera init error: $e");
+      log('[VideoInput] Camera init error: $e');
+      rethrow;
     }
   }
 
-  CameraController get cameraController => _cameraController;
+  /// Returns the underlying [CameraController].
+  /// Throws [StateError] if not yet initialized.
+  CameraController get cameraController {
+    if (!_initialized || _cameraController == null) {
+      throw StateError(
+          '[VideoInput] cameraController accessed before initialization.');
+    }
+    return _cameraController!;
+  }
 
-  Stream<Uint8List> startStreamingImages() {
+  Stream<Uint8List> startStreamingImages({int minIntervalMs = 250}) {
+    // Guard: must be initialized before streaming
+    if (!_initialized || _cameraController == null) {
+      throw StateError(
+          '[VideoInput] startStreamingImages() called before init().');
+    }
+
+    // If already streaming, return existing stream
     if (_isStreaming && _imageStreamController != null) {
       return _imageStreamController!.stream;
     }
 
- 
     _imageStreamController?.close();
     _imageStreamController = StreamController<Uint8List>.broadcast();
 
@@ -52,70 +69,45 @@ class VideoInput extends ChangeNotifier {
     _processingFrame = false;
     _lastFrameTime = 0;
 
-    _cameraController.startImageStream((CameraImage image) async {
-      if (_processingFrame) return;
-      if (!_isStreaming) return;
+    // Guard: don't call startImageStream if already streaming at camera level
+    if (!_cameraController!.value.isStreamingImages) {
+      _cameraController!.startImageStream((CameraImage image) async {
+        if (_processingFrame) return;
+        if (!_isStreaming) return;
 
-      final now = DateTime.now().millisecondsSinceEpoch;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - _lastFrameTime < minIntervalMs) return;
 
-   
-      if (now - _lastFrameTime < 1000) return;
+        _lastFrameTime = now;
+        _processingFrame = true;
 
-      _lastFrameTime = now;
-      _processingFrame = true;
-
-      try {
-        final jpeg = await _convertYuv420ToJpeg(image);
-        if (_isStreaming && 
-            _imageStreamController != null && 
-            !_imageStreamController!.isClosed) {
-          _imageStreamController!.add(jpeg);
+        try {
+          final jpeg = await compute(_convertYuvParamsToJpeg, _YuvParams(
+            width: image.width,
+            height: image.height,
+            yBytes: image.planes[0].bytes,
+            uBytes: image.planes[1].bytes,
+            vBytes: image.planes[2].bytes,
+            yRowStride: image.planes[0].bytesPerRow,
+            uRowStride: image.planes[1].bytesPerRow,
+            vRowStride: image.planes[2].bytesPerRow,
+            uPixelStride: image.planes[1].bytesPerPixel ?? 1,
+            vPixelStride: image.planes[2].bytesPerPixel ?? 1,
+          ));
+          if (_isStreaming &&
+              _imageStreamController != null &&
+              !_imageStreamController!.isClosed) {
+            _imageStreamController!.add(jpeg);
+          }
+        } catch (e) {
+          log('[VideoInput] Frame conversion error: $e');
+        } finally {
+          _processingFrame = false;
         }
-      } catch (e) {
-        log("Frame conversion error: $e");
-      } finally {
-        _processingFrame = false;
-      }
-    });
-
-    return _imageStreamController!.stream;
-  }
-
-  
-  Future<Uint8List> _convertYuv420ToJpeg(CameraImage image) async {
-    final int width = image.width;
-    final int height = image.height;
-
-    final yPlane = image.planes[0];
-    final uPlane = image.planes[1];
-    final vPlane = image.planes[2];
-
-    final imgBuffer = img.Image(width: width, height: height);
-
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        final int yIndex = y * yPlane.bytesPerRow + x;
-
-      
-        final int uvRow = y >> 1;
-        final int uvCol = x >> 1;
-        final int uIndex = uvRow * uPlane.bytesPerRow + uvCol * uPlane.bytesPerPixel!;
-        final int vIndex = uvRow * vPlane.bytesPerRow + uvCol * vPlane.bytesPerPixel!;
-
-        final int yVal = yPlane.bytes[yIndex];
-        final int uVal = uPlane.bytes[uIndex] - 128;
-        final int vVal = vPlane.bytes[vIndex] - 128;
-
-      
-        int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
-        int g = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
-        int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
-
-        imgBuffer.setPixelRgba(x, y, r, g, b, 255);
-      }
+      });
     }
 
-    return Uint8List.fromList(img.encodeJpg(imgBuffer, quality: 60));
+    return _imageStreamController!.stream;
   }
 
   Future<void> stopStreamingImages() async {
@@ -124,11 +116,13 @@ class VideoInput extends ChangeNotifier {
     _isStreaming = false;
 
     try {
-      if (_cameraController.value.isStreamingImages) {
-        await _cameraController.stopImageStream();
+      if (_cameraController != null &&
+          _cameraController!.value.isInitialized &&
+          _cameraController!.value.isStreamingImages) {
+        await _cameraController!.stopImageStream();
       }
     } catch (e) {
-      log("stopImageStream error: $e");
+      log('[VideoInput] stopImageStream error: $e');
     }
 
     await _imageStreamController?.close();
@@ -142,10 +136,67 @@ class VideoInput extends ChangeNotifier {
     _imageStreamController?.close();
     _imageStreamController = null;
 
-    if (_initialized) {
-      _cameraController.dispose();
+    if (_initialized && _cameraController != null) {
+      _cameraController!.dispose();
     }
+    _initialized = false;
 
     super.dispose();
   }
+}
+
+class _YuvParams {
+  final int width;
+  final int height;
+  final Uint8List yBytes;
+  final Uint8List uBytes;
+  final Uint8List vBytes;
+  final int yRowStride;
+  final int uRowStride;
+  final int vRowStride;
+  final int uPixelStride;
+  final int vPixelStride;
+
+  _YuvParams({
+    required this.width,
+    required this.height,
+    required this.yBytes,
+    required this.uBytes,
+    required this.vBytes,
+    required this.yRowStride,
+    required this.uRowStride,
+    required this.vRowStride,
+    required this.uPixelStride,
+    required this.vPixelStride,
+  });
+}
+
+Uint8List _convertYuvParamsToJpeg(_YuvParams params) {
+  final int width = params.width;
+  final int height = params.height;
+
+  final imgBuffer = img.Image(width: width, height: height);
+
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      final int yIndex = y * params.yRowStride + x;
+
+      final int uvRow = y >> 1;
+      final int uvCol = x >> 1;
+      final int uIndex = uvRow * params.uRowStride + uvCol * params.uPixelStride;
+      final int vIndex = uvRow * params.vRowStride + uvCol * params.vPixelStride;
+
+      final int yVal = params.yBytes[yIndex];
+      final int uVal = params.uBytes[uIndex] - 128;
+      final int vVal = params.vBytes[vIndex] - 128;
+
+      final int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
+      final int g = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
+      final int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
+
+      imgBuffer.setPixelRgba(x, y, r, g, b, 255);
+    }
+  }
+
+  return Uint8List.fromList(img.encodeJpg(imgBuffer, quality: 75));
 }

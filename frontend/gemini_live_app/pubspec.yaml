@@ -52,7 +52,7 @@ flutter:
   assets:
     - assets/models/yolov8n.tflite
     - assets/models/yolov8n.txt
-    - .env
+    # - .env
 
 dependency_overrides:
   google_maps_flutter_android: 2.18.3

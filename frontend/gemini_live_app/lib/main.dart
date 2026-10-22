@@ -11,7 +11,7 @@ import 'package:vision_aid_app/src/face_features/registered_face.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await dotenv.load(fileName: ".env");
+  await dotenv.load(fileName: ".env", isOptional: true);
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   
   await Hive.initFlutter();

@@ -1,0 +1,37 @@
+warning: in the working copy of 'frontend/gemini_live_app/android/gradle.properties', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/lib/src/flutterfire_ai_live_api_demo.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/lib/src/providers.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/lib/src/services/tts_service.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/lib/src/utilities/yolo_detector.dart', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/linux/flutter/generated_plugin_registrant.cc', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/linux/flutter/generated_plugin_registrant.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/linux/flutter/generated_plugins.cmake', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/macos/Flutter/GeneratedPluginRegistrant.swift', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/windows/flutter/generated_plugin_registrant.cc', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/windows/flutter/generated_plugin_registrant.h', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'frontend/gemini_live_app/windows/flutter/generated_plugins.cmake', LF will be replaced by CRLF the next time Git touches it
+ .../main/res/drawable-v21/launch_background.xml    |  12 [31m-[m
+ .../src/main/res/drawable/launch_background.xml    |  12 [31m-[m
+ .../app/src/main/res/mipmap-hdpi/ic_launcher.png   | Bin [31m544[m -> [32m0[m bytes
+ .../app/src/main/res/mipmap-mdpi/ic_launcher.png   | Bin [31m442[m -> [32m0[m bytes
+ .../app/src/main/res/mipmap-xhdpi/ic_launcher.png  | Bin [31m721[m -> [32m0[m bytes
+ .../app/src/main/res/mipmap-xxhdpi/ic_launcher.png | Bin [31m1031[m -> [32m0[m bytes
+ .../src/main/res/mipmap-xxxhdpi/ic_launcher.png    | Bin [31m1443[m -> [32m0[m bytes
+ android/app/src/main/res/values-night/styles.xml   |  18 [31m-[m
+ android/app/src/main/res/values/styles.xml         |  18 [31m-[m
+ frontend/gemini_live_app/analysis_options.yaml     |   9 [32m+[m
+ .../gemini_live_app/android/app/build.gradle.kts   |  13 [32m+[m[31m-[m
+ frontend/gemini_live_app/android/build.gradle.kts  |  77 [32m++[m[31m-[m
+ frontend/gemini_live_app/android/gradle.properties |   5 [32m+[m
+ .../gradle/wrapper/gradle-wrapper.properties       |   2 [32m+[m[31m-[m
+ .../gemini_live_app/android/settings.gradle.kts    |   4 [32m+[m[31m-[m
+ frontend/gemini_live_app/lib/main.dart             |   2 [32m+[m[31m-[m
+ .../lib/src/flutterfire_ai_live_api_demo.dart      | 749 [32m+++++++++++++++[m[31m------[m
+ frontend/gemini_live_app/lib/src/providers.dart    |  72 [32m+[m[31m-[m
+ .../lib/src/services/tts_service.dart              | 204 [32m+++++[m[31m-[m
+ .../lib/src/utilities/video_input.dart             | 116 [32m++[m[31m--[m
+ .../lib/src/utilities/yolo_detector.dart           | 289 [32m+++++[m[31m---[m
+ frontend/gemini_live_app/pubspec.lock              |  26 [32m+[m[31m-[m
+ frontend/gemini_live_app/pubspec.yaml              |   2 [32m+[m[31m-[m
+ frontend/gemini_live_app/test/widget_test.dart     | 344 [32m++++++++++[m
+ 24 files changed, 1468 insertions(+), 506 deletions(-)
