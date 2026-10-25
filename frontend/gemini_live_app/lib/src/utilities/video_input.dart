@@ -17,11 +17,15 @@ class RawFrame {
   final Uint8List rgbBytes;
   final int width;
   final int height;
+  /// Camera sensor orientation in degrees (0, 90, 180, 270).
+  /// Back-facing cameras on most Android phones return 90.
+  final int rotation;
 
   const RawFrame({
     required this.rgbBytes,
     required this.width,
     required this.height,
+    this.rotation = 0,
   });
 }
 
@@ -166,6 +170,10 @@ class VideoInput extends ChangeNotifier {
     _lastFrameTime = 0;
 
     if (!_cameraController!.value.isStreamingImages) {
+      // Query once so the closure captures a plain int (no API calls per frame).
+      final int sensorRotation =
+          _cameraController?.description.sensorOrientation ?? 0;
+
       _cameraController!.startImageStream((CameraImage image) async {
         if (_processingFrame) return;
         if (!_isStreaming) return;
@@ -188,6 +196,7 @@ class VideoInput extends ChangeNotifier {
             vRowStride: image.planes[2].bytesPerRow,
             uPixelStride: image.planes[1].bytesPerPixel ?? 1,
             vPixelStride: image.planes[2].bytesPerPixel ?? 1,
+            rotation: sensorRotation,
           ));
           if (_isStreaming &&
               _rawStreamController != null &&
@@ -261,6 +270,7 @@ class _YuvParams {
   final int vRowStride;
   final int uPixelStride;
   final int vPixelStride;
+  final int rotation;
 
   _YuvParams({
     required this.width,
@@ -273,6 +283,7 @@ class _YuvParams {
     required this.vRowStride,
     required this.uPixelStride,
     required this.vPixelStride,
+    this.rotation = 0,
   });
 }
 
@@ -341,5 +352,10 @@ RawFrame _convertYuvToRawFrame(_YuvParams params) {
     }
   }
 
-  return RawFrame(rgbBytes: rgb, width: width, height: height);
+  return RawFrame(
+    rgbBytes: rgb,
+    width: width,
+    height: height,
+    rotation: params.rotation,
+  );
 }

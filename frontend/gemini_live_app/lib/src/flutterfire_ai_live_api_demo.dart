@@ -223,9 +223,15 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
       if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
       final results = await _yoloDetector.detectRaw(frame);
       if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
-        setState(() {
-          _detections = results;
-        });
+        // Gate rebuild: only setState when detections actually changed.
+        final changed = results.length != _detections.length ||
+            !results.asMap().entries.every((e) =>
+                e.value.label == _detections[e.key].label);
+        if (changed) {
+          setState(() {
+            _detections = results;
+          });
+        }
         await _ttsService.announceDetections(results);
       }
     });
@@ -442,9 +448,15 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
           if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
           final results = await _yoloDetector.detectRaw(frame);
           if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
-            setState(() {
-              _detections = results;
-            });
+            // Gate rebuild: only setState when detections actually changed.
+            final changed = results.length != _detections.length ||
+                !results.asMap().entries.every((e) =>
+                    e.value.label == _detections[e.key].label);
+            if (changed) {
+              setState(() {
+                _detections = results;
+              });
+            }
             await _ttsService.announceDetections(results);
           }
         });

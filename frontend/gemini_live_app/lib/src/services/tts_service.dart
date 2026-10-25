@@ -9,14 +9,18 @@ class TtsService {
   DateTime? _lastAnnouncementTime;
   String? _lastSpokenPhrase;
 
+  // Set of labels present in the previous detection frame — used for the
+  // "newly appeared" urgency override.
+  Set<String> _previousLabels = {};
+
   // Rate-limiting and deduplication durations
   final Duration cooldown;
   final Duration repeatCooldown;
 
   TtsService({
     FlutterTts? flutterTts,
-    this.cooldown = const Duration(milliseconds: 3000),
-    this.repeatCooldown = const Duration(milliseconds: 6000),
+    this.cooldown = const Duration(milliseconds: 4000),
+    this.repeatCooldown = const Duration(milliseconds: 8000),
   }) : _flutterTts = flutterTts ?? FlutterTts();
 
   bool get isSpeaking => _isSpeaking;
@@ -28,7 +32,9 @@ class TtsService {
     if (_isInitialized) return;
     try {
       await _flutterTts.setLanguage("en-US");
-      await _flutterTts.setSpeechRate(0.5);
+      // 0.5 is the default but we drop to 0.45 for slightly clearer articulation
+      // on noisy environments; still fast enough for real-time use.
+      await _flutterTts.setSpeechRate(0.45);
       await _flutterTts.setVolume(1.0);
       await _flutterTts.setPitch(1.0);
 
@@ -70,33 +76,64 @@ class TtsService {
     }
   }
 
-  /// Constructs a concise, grammatical, non-repetitive spatial announcement
+  /// Returns the correct form of "to be" for [count] items.
+  static String _verb(int count) => count == 1 ? 'is' : 'are';
+
+  /// Returns the indefinite article for [label] ("a" or "an").
+  static String _article(String label) {
+    const vowelStarts = {'a', 'e', 'i', 'o', 'u'};
+    return (label.isNotEmpty && vowelStarts.contains(label[0].toLowerCase()))
+        ? 'an'
+        : 'a';
+  }
+
+  /// Pluralises [label] naively (appends "s").
+  static String _plural(String label) => '${label}s';
+
+  /// Constructs a concise, grammatical, natural-language spatial announcement
   /// from the top detected obstacles.
-  /// Takes at most the top 2 highest-confidence detections.
-  /// Returns null if detections are empty or no phrase should be spoken.
+  ///
+  /// Examples:
+  ///   1 person ahead            → "A person is ahead."
+  ///   2 people ahead            → "Two people are ahead."
+  ///   person left + chair ahead → "A person is on your left, and a chair is ahead."
+  ///   person + chair both ahead → "A person and a chair are ahead."
   static String? buildSpatialAnnouncement(List<DetectionResult> detections) {
     if (detections.isEmpty) return null;
 
-    // Take top 2 highest-confidence detections
+    // Group by label and direction: take the top 2 by confidence.
     final items = detections.take(2).toList();
 
     if (items.length == 1) {
       final det = items[0];
       final dir = getDirection(det.boundingBox[0]);
-      return "${_capitalize(det.label)} $dir.";
-    } else {
-      final d1 = items[0];
-      final d2 = items[1];
-      final dir1 = getDirection(d1.boundingBox[0]);
-      final dir2 = getDirection(d2.boundingBox[0]);
+      final art = _article(det.label);
+      return "${_capitalize(art)} ${det.label} is $dir.";
+    }
 
+    final d1 = items[0];
+    final d2 = items[1];
+    final dir1 = getDirection(d1.boundingBox[0]);
+    final dir2 = getDirection(d2.boundingBox[0]);
+
+    if (d1.label == d2.label) {
+      // Same class: "Two people are ahead." / "Two people are on your left."
       if (dir1 == dir2) {
-        // Same direction: "Person and chair ahead."
-        return "${_capitalize(d1.label)} and ${d2.label} $dir1.";
+        return "Two ${_plural(d1.label)} ${_verb(2)} $dir1.";
       } else {
-        // Different directions: "Person ahead, and chair on your left."
-        return "${_capitalize(d1.label)} $dir1, and ${d2.label} $dir2.";
+        return "Two ${_plural(d1.label)} — one $dir1, one $dir2.";
       }
+    }
+
+    if (dir1 == dir2) {
+      // Different labels, same direction: "A person and a chair are ahead."
+      final art2 = _article(d2.label);
+      return "${_capitalize(_article(d1.label))} ${d1.label} and $art2 ${d2.label} are $dir1.";
+    } else {
+      // Different labels, different directions:
+      // "A person is ahead, and a chair is on your left."
+      final art2 = _article(d2.label);
+      return "${_capitalize(_article(d1.label))} ${d1.label} is $dir1, and $art2 ${d2.label} is $dir2.";
     }
   }
 
@@ -112,14 +149,20 @@ class TtsService {
     required DateTime? lastSpokenTime,
     required DateTime currentTime,
     required bool isSpeaking,
-    Duration cooldown = const Duration(milliseconds: 3000),
-    Duration repeatCooldown = const Duration(milliseconds: 6000),
+    Duration cooldown = const Duration(milliseconds: 4000),
+    Duration repeatCooldown = const Duration(milliseconds: 8000),
+    bool hasNewlyAppearedLabel = false,
   }) {
     if (newPhrase == null || newPhrase.isEmpty) return false;
     if (isSpeaking) return false;
 
     if (lastSpokenTime != null) {
       final elapsed = currentTime.difference(lastSpokenTime);
+      // If an object newly appeared in the frame, override the cooldown so
+      // the user is warned promptly even if a phrase was recently spoken.
+      if (hasNewlyAppearedLabel && newPhrase != lastPhrase) {
+        return true;
+      }
       if (elapsed < cooldown) {
         return false;
       }
@@ -137,12 +180,21 @@ class TtsService {
     List<DetectionResult> detections, {
     DateTime? testCurrentTime,
   }) async {
-    if (detections.isEmpty) return;
+    if (detections.isEmpty) {
+      _previousLabels = {};
+      return;
+    }
 
     final phrase = buildSpatialAnnouncement(detections);
     if (phrase == null) return;
 
     final now = testCurrentTime ?? DateTime.now();
+
+    // Detect any labels that weren't in the previous frame.
+    final currentLabels = detections.map((d) => d.label).toSet();
+    final hasNewlyAppearedLabel =
+        currentLabels.any((l) => !_previousLabels.contains(l));
+    _previousLabels = currentLabels;
 
     final eligible = shouldAnnounce(
       newPhrase: phrase,
@@ -152,6 +204,7 @@ class TtsService {
       isSpeaking: _isSpeaking,
       cooldown: cooldown,
       repeatCooldown: repeatCooldown,
+      hasNewlyAppearedLabel: hasNewlyAppearedLabel,
     );
 
     if (!eligible) return;
@@ -187,6 +240,7 @@ class TtsService {
     _lastAnnouncementTime = null;
     _lastSpokenPhrase = null;
     _isSpeaking = false;
+    _previousLabels = {};
   }
 
   void dispose() {

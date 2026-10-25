@@ -187,7 +187,22 @@ void main() {
       final single = [
         DetectionResult(label: 'person', confidence: 0.92, boundingBox: [0.5, 0.5, 0.2, 0.4]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(single), "Person ahead.");
+      expect(TtsService.buildSpatialAnnouncement(single), 'A person is ahead.');
+    });
+
+    test('buildSpatialAnnouncement formats single obstacle starting with vowel', () {
+      final single = [
+        DetectionResult(label: 'orange', confidence: 0.80, boundingBox: [0.1, 0.5, 0.2, 0.2]),
+      ];
+      expect(TtsService.buildSpatialAnnouncement(single), 'An orange is on your left.');
+    });
+
+    test('buildSpatialAnnouncement formats two same-label obstacles in same direction', () {
+      final sameDir = [
+        DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
+        DetectionResult(label: 'person', confidence: 0.88, boundingBox: [0.4, 0.5, 0.2, 0.2]),
+      ];
+      expect(TtsService.buildSpatialAnnouncement(sameDir), 'Two persons are ahead.');
     });
 
     test('buildSpatialAnnouncement formats two obstacles in same direction', () {
@@ -195,7 +210,7 @@ void main() {
         DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
         DetectionResult(label: 'chair', confidence: 0.88, boundingBox: [0.4, 0.5, 0.2, 0.2]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(sameDir), "Person and chair ahead.");
+      expect(TtsService.buildSpatialAnnouncement(sameDir), 'A person and a chair are ahead.');
     });
 
     test('buildSpatialAnnouncement formats two obstacles in different directions', () {
@@ -203,7 +218,10 @@ void main() {
         DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
         DetectionResult(label: 'chair', confidence: 0.88, boundingBox: [0.1, 0.5, 0.2, 0.2]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(diffDir), "Person ahead, and chair on your left.");
+      expect(
+        TtsService.buildSpatialAnnouncement(diffDir),
+        'A person is ahead, and a chair is on your left.',
+      );
     });
 
     test('buildSpatialAnnouncement returns null for empty detections', () {
@@ -227,13 +245,13 @@ void main() {
     test('shouldAnnounce enforces minimum cooldown between consecutive announcements', () {
       final t0 = DateTime(2026, 1, 1, 12, 0, 0);
       final tAfter2s = t0.add(const Duration(seconds: 2));
-      final tAfter4s = t0.add(const Duration(seconds: 4));
+      final tAfter5s = t0.add(const Duration(seconds: 5));
 
-      // 2 seconds later (within 3s cooldown) -> false
+      // 2 seconds later (within 4s cooldown) -> false
       expect(
         TtsService.shouldAnnounce(
-          newPhrase: "Chair on your left.",
-          lastPhrase: "Person ahead.",
+          newPhrase: "A chair is on your left.",
+          lastPhrase: "A person is ahead.",
           lastSpokenTime: t0,
           currentTime: tAfter2s,
           isSpeaking: false,
@@ -241,13 +259,13 @@ void main() {
         false,
       );
 
-      // 4 seconds later for different phrase -> true
+      // 5 seconds later for different phrase -> true
       expect(
         TtsService.shouldAnnounce(
-          newPhrase: "Chair on your left.",
-          lastPhrase: "Person ahead.",
+          newPhrase: "A chair is on your left.",
+          lastPhrase: "A person is ahead.",
           lastSpokenTime: t0,
-          currentTime: tAfter4s,
+          currentTime: tAfter5s,
           isSpeaking: false,
         ),
         true,
@@ -256,29 +274,47 @@ void main() {
 
     test('shouldAnnounce suppresses rapid repeat of identical phrase', () {
       final t0 = DateTime(2026, 1, 1, 12, 0, 0);
-      final tAfter4s = t0.add(const Duration(seconds: 4));
-      final tAfter7s = t0.add(const Duration(seconds: 7));
+      final tAfter5s = t0.add(const Duration(seconds: 5));
+      final tAfter9s = t0.add(const Duration(seconds: 9));
 
-      // Same phrase 4 seconds later (within 6s repeat cooldown) -> suppressed!
+      // Same phrase 5 seconds later (within 8s repeat cooldown) -> suppressed!
       expect(
         TtsService.shouldAnnounce(
-          newPhrase: "Person ahead.",
-          lastPhrase: "Person ahead.",
+          newPhrase: "A person is ahead.",
+          lastPhrase: "A person is ahead.",
           lastSpokenTime: t0,
-          currentTime: tAfter4s,
+          currentTime: tAfter5s,
           isSpeaking: false,
         ),
         false,
       );
 
-      // Same phrase 7 seconds later (beyond 6s repeat cooldown) -> allowed
+      // Same phrase 9 seconds later (beyond 8s repeat cooldown) -> allowed
       expect(
         TtsService.shouldAnnounce(
-          newPhrase: "Person ahead.",
-          lastPhrase: "Person ahead.",
+          newPhrase: "A person is ahead.",
+          lastPhrase: "A person is ahead.",
           lastSpokenTime: t0,
-          currentTime: tAfter7s,
+          currentTime: tAfter9s,
           isSpeaking: false,
+        ),
+        true,
+      );
+    });
+
+    test('shouldAnnounce allows announce when a new label has appeared (urgency override)', () {
+      final t0 = DateTime(2026, 1, 1, 12, 0, 0);
+      final tAfter1s = t0.add(const Duration(seconds: 1));
+
+      // Would normally be blocked by cooldown, but a new label appeared.
+      expect(
+        TtsService.shouldAnnounce(
+          newPhrase: "A car is ahead.",
+          lastPhrase: "A person is ahead.",
+          lastSpokenTime: t0,
+          currentTime: tAfter1s,
+          isSpeaking: false,
+          hasNewlyAppearedLabel: true,
         ),
         true,
       );

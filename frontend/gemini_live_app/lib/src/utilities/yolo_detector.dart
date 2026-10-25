@@ -95,8 +95,9 @@ void _yoloIsolateEntry(SendPort callerPort) {
         final rgbBytes = msg['rgbBytes'] as Uint8List;
         final srcWidth  = msg['width']  as int;
         final srcHeight = msg['height'] as int;
+        final rotation  = (msg['rotation'] as int?) ?? 0;
         final results = _isolateRunInferenceRaw(
-            interpreter!, labels!, rgbBytes, srcWidth, srcHeight);
+            interpreter!, labels!, rgbBytes, srcWidth, srcHeight, rotation);
         replyPort.send(results);
       } catch (e) {
         replyPort.send(<Map<String, dynamic>>[]);
@@ -123,21 +124,30 @@ List<Map<String, dynamic>> _isolateRunInference(
 ///
 /// [rgbBytes] is a packed `srcWidth × srcHeight × 3` buffer (R, G, B per
 /// pixel, row-major) as produced by [VideoInput.startStreamingRawFrames].
+/// [rotation] is the camera sensor orientation in degrees (0/90/180/270).
+/// On most portrait-mode Android phones the back camera reports 90°, so the
+/// raw frame is landscape and must be rotated before inference so that the
+/// model's x-axis aligns with the phone's left–right axis.
 List<Map<String, dynamic>> _isolateRunInferenceRaw(
   Interpreter interpreter,
   List<String> labels,
   Uint8List rgbBytes,
   int srcWidth,
-  int srcHeight,
-) {
+  int srcHeight, [
+  int rotation = 0,
+]) {
   // Build an img.Image directly from the raw RGB bytes — no codec involved.
-  final image = img.Image.fromBytes(
+  img.Image image = img.Image.fromBytes(
     width: srcWidth,
     height: srcHeight,
     bytes: rgbBytes.buffer,
     numChannels: 3,
     order: img.ChannelOrder.rgb,
   );
+  // Rotate so model-x aligns with phone screen-x (fast path for 0°).
+  if (rotation != 0) {
+    image = img.copyRotate(image, angle: rotation);
+  }
   return _isolateRunInferenceFromImage(interpreter, labels, image);
 }
 
@@ -426,6 +436,7 @@ class YoloDetector {
         'rgbBytes': frame.rgbBytes,
         'width': frame.width,
         'height': frame.height,
+        'rotation': frame.rotation,
         'replyPort': replyPort.sendPort,
       });
 
