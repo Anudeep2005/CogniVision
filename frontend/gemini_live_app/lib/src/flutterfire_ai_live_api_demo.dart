@@ -9,6 +9,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'ui_components/ui_components.dart';
 import 'providers.dart';
 import 'utilities/yolo_detector.dart';
+import 'utilities/video_input.dart' show RawFrame, VideoInput;
 import 'services/tts_service.dart';
 
 class FlutterFireAILiveAPIDemo extends ConsumerStatefulWidget {
@@ -217,10 +218,10 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
     _yoloSubscription?.cancel();
     _yoloSubscription = videoInput
-        .startStreamingImages(minIntervalMs: 250)
-        .listen((jpeg) async {
+        .startStreamingRawFrames(minIntervalMs: 250)
+        .listen((frame) async {
       if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
-      final results = await _yoloDetector.detect(jpeg);
+      final results = await _yoloDetector.detectRaw(frame);
       if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
         setState(() {
           _detections = results;
@@ -436,10 +437,10 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
         _yoloSubscription?.cancel();
         _yoloSubscription = videoInput
-            .startStreamingImages(minIntervalMs: 250)
-            .listen((jpeg) async {
+            .startStreamingRawFrames(minIntervalMs: 250)
+            .listen((frame) async {
           if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
-          final results = await _yoloDetector.detect(jpeg);
+          final results = await _yoloDetector.detectRaw(frame);
           if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
             setState(() {
               _detections = results;
