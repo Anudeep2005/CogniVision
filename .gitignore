@@ -44,6 +44,11 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+
+#Frontend / React.js
+
+frontend/webapp/.env
+
 # Backend / Node.js
 **/node_modules/
 **/node_modules
