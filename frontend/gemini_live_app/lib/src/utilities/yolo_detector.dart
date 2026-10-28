@@ -1,11 +1,27 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:image/image.dart' as img;
-import 'video_input.dart' show RawFrame;
+import 'package:tflite_flutter/tflite_flutter.dart';
+
+import 'video_input.dart' show RawFrame, YuvFrame;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tunables
+// ─────────────────────────────────────────────────────────────────────────────
+
+const int _kInputSize = 640; // model input is [1, 3, 640, 640] (NCHW, float32)
+const int _kNumRows = 84; // 4 box values + 80 class scores
+const int _kNumAnchors = 8400;
+
+const double _kConfThreshold = 0.45;
+const double _kIouThreshold = 0.45;
+const int _kMaxDetections = 10;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data model
@@ -42,265 +58,422 @@ class DetectionResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Worker-isolate plumbing  (all top-level — required by Isolate.spawn)
+// Worker isolate (everything heavy happens here, never on the UI isolate)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Persistent worker-isolate entry point.
-/// Called once by [Isolate.spawn]; never called from application code.
 void _yoloIsolateEntry(SendPort callerPort) {
-  final myPort = ReceivePort();
-  callerPort.send(myPort.sendPort); // hand back our own port
+  final port = ReceivePort();
+  callerPort.send(port.sendPort);
 
-  Interpreter? interpreter;
-  List<String>? labels;
+  final worker = _YoloWorker();
 
-  myPort.listen((dynamic msg) {
-    if (msg is! Map<String, dynamic>) return;
-    final type = msg['type'] as String;
+  port.listen((dynamic msg) {
+    if (msg is! Map) return;
+    final String type = msg['type'] as String;
+    final SendPort? reply = msg['replyPort'] as SendPort?;
 
-    if (type == 'init') {
-      final replyPort = msg['replyPort'] as SendPort;
-      // ── Initialise the interpreter from raw model bytes ──────────────────
-      try {
-        final modelBytes = msg['modelBytes'] as Uint8List;
-        labels = (msg['labels'] as List<dynamic>).cast<String>();
-        interpreter = Interpreter.fromBuffer(modelBytes);
-        replyPort.send(true);
-      } catch (e) {
-        replyPort.send('init_error:$e');
+    try {
+      switch (type) {
+        case 'init':
+          final String? error = worker.init(
+            msg['modelBytes'] as Uint8List,
+            (msg['labels'] as List<dynamic>).cast<String>(),
+            msg['threads'] as int,
+          );
+          reply?.send(error == null ? true : 'init_error:$error');
+          break;
+        case 'yuv':
+          reply?.send(worker.runYuv(msg));
+          break;
+        case 'rgb':
+          reply?.send(worker.runRgb(msg));
+          break;
+        case 'shutdown':
+          worker.close();
+          port.close();
+          break;
       }
-    } else if (type == 'infer') {
-      final replyPort = msg['replyPort'] as SendPort;
-      // ── Run full inference synchronously (this is the worker isolate) ────
-      if (interpreter == null || labels == null) {
-        replyPort.send(<Map<String, dynamic>>[]);
-        return;
-      }
-      try {
-        final jpegBytes = msg['jpegBytes'] as Uint8List;
-        final results =
-            _isolateRunInference(interpreter!, labels!, jpegBytes);
-        replyPort.send(results);
-      } catch (e) {
-        replyPort.send(<Map<String, dynamic>>[]);
-      }
-    } else if (type == 'infer_raw') {
-      final replyPort = msg['replyPort'] as SendPort;
-      // ── Raw-RGB path: no JPEG decode, direct pixel access ─────────────────
-      if (interpreter == null || labels == null) {
-        replyPort.send(<Map<String, dynamic>>[]);
-        return;
-      }
-      try {
-        final rgbBytes = msg['rgbBytes'] as Uint8List;
-        final srcWidth  = msg['width']  as int;
-        final srcHeight = msg['height'] as int;
-        final rotation  = (msg['rotation'] as int?) ?? 0;
-        final results = _isolateRunInferenceRaw(
-            interpreter!, labels!, rgbBytes, srcWidth, srcHeight, rotation);
-        replyPort.send(results);
-      } catch (e) {
-        replyPort.send(<Map<String, dynamic>>[]);
-      }
-    } else if (type == 'shutdown') {
-      interpreter?.close();
-      myPort.close();
+    } catch (e) {
+      reply?.send(<String, dynamic>{'error': e.toString()});
     }
   });
 }
 
-/// JPEG path — kept for backward compatibility (e.g. fallback / tests).
-List<Map<String, dynamic>> _isolateRunInference(
-  Interpreter interpreter,
-  List<String> labels,
-  Uint8List jpegBytes,
-) {
-  final image = img.decodeImage(jpegBytes);
-  if (image == null) return [];
-  return _isolateRunInferenceFromImage(interpreter, labels, image);
-}
+class _YoloWorker {
+  Interpreter? _interpreter;
+  List<String> _labels = const [];
 
-/// Raw-RGB path — eliminates the JPEG encode/decode round-trip.
-///
-/// [rgbBytes] is a packed `srcWidth × srcHeight × 3` buffer (R, G, B per
-/// pixel, row-major) as produced by [VideoInput.startStreamingRawFrames].
-/// [rotation] is the camera sensor orientation in degrees (0/90/180/270).
-/// On most portrait-mode Android phones the back camera reports 90°, so the
-/// raw frame is landscape and must be rotated before inference so that the
-/// model's x-axis aligns with the phone's left–right axis.
-List<Map<String, dynamic>> _isolateRunInferenceRaw(
-  Interpreter interpreter,
-  List<String> labels,
-  Uint8List rgbBytes,
-  int srcWidth,
-  int srcHeight, [
-  int rotation = 0,
-]) {
-  // Build an img.Image directly from the raw RGB bytes — no codec involved.
-  img.Image image = img.Image.fromBytes(
-    width: srcWidth,
-    height: srcHeight,
-    bytes: rgbBytes.buffer,
-    numChannels: 3,
-    order: img.ChannelOrder.rgb,
-  );
-  // Rotate so model-x aligns with phone screen-x (fast path for 0°).
-  if (rotation != 0) {
-    image = img.copyRotate(image, angle: rotation);
+  /// true  → raw-bytes I/O (no nested lists, fastest)
+  /// false → nested-list fallback (slow, only if the fast path is unsupported)
+  bool _fastIo = true;
+
+  // Re-used buffers (allocated once, never per frame).
+  final Float32List _input = Float32List(3 * _kInputSize * _kInputSize);
+  late final Uint8List _inputBytes = _input.buffer.asUint8List();
+  final Uint8List _outBytes = Uint8List(_kNumRows * _kNumAnchors * 4);
+  late final Float32List _out = _outBytes.buffer.asFloat32List();
+  final Float32List _best = Float32List(_kNumAnchors);
+  final Int32List _cls = Int32List(_kNumAnchors);
+  final Float32List _lut = Float32List(256);
+
+  // Sampling tables (rebuilt only when the frame geometry changes).
+  final Int32List _colTab = Int32List(_kInputSize);
+  final Int32List _rowTab = Int32List(_kInputSize);
+  int _tabW = -1;
+  int _tabH = -1;
+  int _tabRot = -1;
+
+  _YoloWorker() {
+    for (int i = 0; i < 256; i++) {
+      _lut[i] = i / 255.0;
+    }
   }
-  return _isolateRunInferenceFromImage(interpreter, labels, image);
-}
 
-/// Shared core: resize → NCHW tensor → run → parse.
-List<Map<String, dynamic>> _isolateRunInferenceFromImage(
-  Interpreter interpreter,
-  List<String> labels,
-  img.Image image,
-) {
-  // 1. Resize to 640×640
-  final resized = img.copyResize(
-    image,
-    width: _kInputSize,
-    height: _kInputSize,
-    interpolation: img.Interpolation.linear,
-  );
+  // ── init ──────────────────────────────────────────────────────────────────
 
-  // 2. Build NCHW [1, 3, 640, 640] nested list
-  final inputTensor = <List<List<List<double>>>>[
-    List.generate(
-      3,
-      (c) => List.generate(
-        _kInputSize,
-        (y) => List.generate(_kInputSize, (x) {
-          final px = resized.getPixel(x, y);
-          switch (c) {
-            case 0:
-              return px.r / 255.0;
-            case 1:
-              return px.g / 255.0;
-            default:
-              return px.b / 255.0;
-          }
-        }),
-      ),
-    )
-  ];
+  /// Returns null on success or an error message.
+  String? init(Uint8List modelBytes, List<String> labels, int threads) {
+    try {
+      _labels = labels;
+      final options = InterpreterOptions()..threads = threads;
+      final interpreter = Interpreter.fromBuffer(modelBytes, options: options);
+      _interpreter = interpreter;
 
-  // 3. Output buffer [1, 84, 8400]
-  final outputBuffer = <List<List<double>>>[
-    List.generate(84, (_) => List<double>.filled(_kNumAnchors, 0.0))
-  ];
+      final inShape = interpreter.getInputTensor(0).shape;
+      final outShape = interpreter.getOutputTensor(0).shape;
+      if (inShape.length != 4 ||
+          inShape[1] != 3 ||
+          inShape[2] != _kInputSize ||
+          inShape[3] != _kInputSize) {
+        return 'Unexpected input shape $inShape (expected [1, 3, 640, 640]).';
+      }
+      if (outShape.length != 3 ||
+          outShape[1] != _kNumRows ||
+          outShape[2] != _kNumAnchors) {
+        return 'Unexpected output shape $outShape (expected [1, 84, 8400]). '
+            'If you switched models (e.g. YOLO26) the parser must be updated.';
+      }
 
-  // 4. Run inference (blocks THIS isolate, not the main UI thread)
-  interpreter.run(inputTensor, outputBuffer);
+      // Self-test: pick the fastest I/O path that actually works here.
+      // The output buffer is pre-filled with 0xFF (= NaN floats), so any value
+      // the model really wrote is detectable, whatever its magnitude.
+      _input.fillRange(0, _input.length, 0.0);
+      _fastIo = true;
+      bool ok = false;
+      try {
+        _outBytes.fillRange(0, _outBytes.length, 0xFF);
+        interpreter.run(_inputBytes, _outBytes);
+        ok = _outputWasWritten();
+      } catch (_) {
+        ok = false;
+      }
+      if (!ok) {
+        _fastIo = false;
+        _outBytes.fillRange(0, _outBytes.length, 0xFF);
+        _runCompat();
+        if (!_outputWasWritten()) {
+          return 'Model produced no output during self-test.';
+        }
+      }
+      return null;
+    } catch (e) {
+      return e.toString();
+    }
+  }
 
-  // 5. Decode + NMS → serialisable maps
-  return _parseToMaps(outputBuffer, labels);
-}
+  bool _outputWasWritten() {
+    // Sample the box rows and a few class rows; NaN means "never written".
+    for (int r = 0; r < 8; r++) {
+      final int base = r * _kNumAnchors;
+      for (int i = 0; i < 64; i++) {
+        if (!_out[base + i].isNaN) return true;
+      }
+    }
+    return false;
+  }
 
-List<Map<String, dynamic>> _parseToMaps(
-  List<List<List<double>>> output,
-  List<String> labels,
-) {
-  const confidenceThreshold = 0.25;
-  const iouThreshold = 0.45;
-  const maxDetections = 10;
+  void close() {
+    _interpreter?.close();
+    _interpreter = null;
+  }
 
-  final int numClasses = labels.length;
-  final batch = output[0]; // [84, 8400]
+  // ── entry points ──────────────────────────────────────────────────────────
 
-  final candidates = <Map<String, dynamic>>[];
+  Map<String, dynamic> runYuv(Map msg) {
+    final sw = Stopwatch()..start();
 
-  for (int i = 0; i < _kNumAnchors; i++) {
-    double maxConf = 0.0;
-    int classId = -1;
+    final Uint8List y =
+        (msg['y'] as TransferableTypedData).materialize().asUint8List();
+    final Uint8List u =
+        (msg['u'] as TransferableTypedData).materialize().asUint8List();
+    final Uint8List v =
+        (msg['v'] as TransferableTypedData).materialize().asUint8List();
+
+    _fillFromYuv(
+      y,
+      u,
+      v,
+      msg['width'] as int,
+      msg['height'] as int,
+      msg['yRowStride'] as int,
+      msg['uRowStride'] as int,
+      msg['vRowStride'] as int,
+      msg['uPixelStride'] as int,
+      msg['vPixelStride'] as int,
+      msg['rotation'] as int,
+    );
+    return _inferAndParse(sw);
+  }
+
+  Map<String, dynamic> runRgb(Map msg) {
+    final sw = Stopwatch()..start();
+    final Uint8List rgb =
+        (msg['rgb'] as TransferableTypedData).materialize().asUint8List();
+    _fillFromRgb(rgb, msg['width'] as int, msg['height'] as int);
+    return _inferAndParse(sw);
+  }
+
+  Map<String, dynamic> _inferAndParse(Stopwatch sw) {
+    final int preMs = sw.elapsedMilliseconds;
+    sw.reset();
+
+    if (_fastIo) {
+      _interpreter!.run(_inputBytes, _outBytes);
+    } else {
+      _runCompat();
+    }
+    final int infMs = sw.elapsedMilliseconds;
+    sw.reset();
+
+    final detections = _parseFlat();
+    return <String, dynamic>{
+      'det': detections,
+      'preMs': preMs,
+      'infMs': infMs,
+      'postMs': sw.elapsedMilliseconds,
+    };
+  }
+
+  /// Slow fallback using nested lists (only used if the raw-bytes path fails).
+  void _runCompat() {
+    final nestedIn = _input.reshape([1, 3, _kInputSize, _kInputSize]);
+    final nestedOut = <List<List<double>>>[
+      List.generate(_kNumRows, (_) => List<double>.filled(_kNumAnchors, 0.0)),
+    ];
+    _interpreter!.run(nestedIn, nestedOut);
+    final rows = nestedOut[0];
+    int k = 0;
+    for (int r = 0; r < _kNumRows; r++) {
+      final row = rows[r];
+      for (int i = 0; i < _kNumAnchors; i++) {
+        _out[k++] = row[i];
+      }
+    }
+  }
+
+  // ── preprocessing: YUV (sensor orientation) → NCHW float tensor ───────────
+  //
+  // One pass does: YUV→RGB, rotate upright, stretch to 640×640, /255.
+  // (Verified against a numpy reference for 0/90/180/270.)
+
+  void _ensureYuvTables(int w, int h, int rot) {
+    if (w == _tabW && h == _tabH && rot == _tabRot) return;
+    final bool transposed = rot == 90 || rot == 270;
+    final int ow = transposed ? h : w;
+    final int oh = transposed ? w : h;
+
+    for (int t = 0; t < _kInputSize; t++) {
+      final int ox = (t * ow) ~/ _kInputSize;
+      final int oy = (t * oh) ~/ _kInputSize;
+      if (!transposed) {
+        _colTab[t] = rot == 0 ? ox : w - 1 - ox; // source x
+        _rowTab[t] = rot == 0 ? oy : h - 1 - oy; // source y
+      } else {
+        _colTab[t] = rot == 90 ? h - 1 - ox : ox; // source y
+        _rowTab[t] = rot == 90 ? oy : w - 1 - oy; // source x
+      }
+    }
+    _tabW = w;
+    _tabH = h;
+    _tabRot = rot;
+  }
+
+  void _fillFromYuv(
+    Uint8List yb,
+    Uint8List ub,
+    Uint8List vb,
+    int w,
+    int h,
+    int ys,
+    int us,
+    int vs,
+    int up,
+    int vp,
+    int rotation,
+  ) {
+    final int rot = ((((rotation % 360) + 360) % 360) ~/ 90) * 90;
+    _ensureYuvTables(w, h, rot);
+    final bool transposed = rot == 90 || rot == 270;
+
+    const int size = _kInputSize;
+    const int plane = size * size;
+    final Float32List tensor = _input;
+    final Float32List lut = _lut;
+    final Int32List col = _colTab;
+    final Int32List row = _rowTab;
+
+    for (int ty = 0; ty < size; ty++) {
+      final int r = row[ty];
+      final int base = ty * size;
+      for (int tx = 0; tx < size; tx++) {
+        final int c = col[tx];
+        final int x = transposed ? r : c;
+        final int y = transposed ? c : r;
+
+        final int yv = yb[y * ys + x];
+        final int uvRow = y >> 1;
+        final int uvCol = x >> 1;
+        final int uv = ub[uvRow * us + uvCol * up] - 128;
+        final int vv = vb[uvRow * vs + uvCol * vp] - 128;
+
+        int rr = yv + ((1436 * vv) >> 10);
+        int gg = yv - ((352 * uv + 731 * vv) >> 10);
+        int bb = yv + ((1815 * uv) >> 10);
+        rr = rr < 0 ? 0 : (rr > 255 ? 255 : rr);
+        gg = gg < 0 ? 0 : (gg > 255 ? 255 : gg);
+        bb = bb < 0 ? 0 : (bb > 255 ? 255 : bb);
+
+        final int i = base + tx;
+        tensor[i] = lut[rr];
+        tensor[plane + i] = lut[gg];
+        tensor[2 * plane + i] = lut[bb];
+      }
+    }
+  }
+
+  /// Generic packed-RGB (already upright) → tensor, nearest-neighbour stretch.
+  void _fillFromRgb(Uint8List rgb, int sw, int sh) {
+    const int size = _kInputSize;
+    const int plane = size * size;
+    final Float32List tensor = _input;
+    final Float32List lut = _lut;
+
+    final cols = Int32List(size);
+    for (int t = 0; t < size; t++) {
+      cols[t] = ((t * sw) ~/ size) * 3;
+    }
+    for (int ty = 0; ty < size; ty++) {
+      final int rowOff = ((ty * sh) ~/ size) * sw * 3;
+      final int base = ty * size;
+      for (int tx = 0; tx < size; tx++) {
+        final int p = rowOff + cols[tx];
+        final int i = base + tx;
+        tensor[i] = lut[rgb[p]];
+        tensor[plane + i] = lut[rgb[p + 1]];
+        tensor[2 * plane + i] = lut[rgb[p + 2]];
+      }
+    }
+  }
+
+  // ── postprocessing on the flat [84 * 8400] output ─────────────────────────
+  //
+  // Layout is row-major: value(row r, anchor i) = out[r * 8400 + i].
+  // Rows 0..3 = cx, cy, w, h (ALREADY normalised 0..1 for this TFLite export),
+  // rows 4..83 = class scores. Class-major scan keeps memory access sequential.
+
+  List<Map<String, dynamic>> _parseFlat() {
+    const int n = _kNumAnchors;
+    final Float32List o = _out;
+    final int numClasses = math.min(_labels.length, _kNumRows - 4);
+
+    _best.fillRange(0, n, 0.0);
+    _cls.fillRange(0, n, -1);
 
     for (int j = 0; j < numClasses; j++) {
-      final conf = batch[4 + j][i];
-      if (conf > maxConf) {
-        maxConf = conf;
-        classId = j;
+      final int base = (4 + j) * n;
+      for (int i = 0; i < n; i++) {
+        final double c = o[base + i];
+        if (c > _best[i]) {
+          _best[i] = c;
+          _cls[i] = j;
+        }
       }
     }
 
-    if (maxConf > confidenceThreshold && classId >= 0) {
-      candidates.add({
-        'label': labels[classId],
-        'confidence': maxConf,
-        'cx': (batch[0][i] / _kInputSize).clamp(0.0, 1.0),
-        'cy': (batch[1][i] / _kInputSize).clamp(0.0, 1.0),
-        'w': (batch[2][i] / _kInputSize).clamp(0.0, 1.0),
-        'h': (batch[3][i] / _kInputSize).clamp(0.0, 1.0),
-      });
+    final candidates = <int>[];
+    for (int i = 0; i < n; i++) {
+      if (_best[i] > _kConfThreshold && _cls[i] >= 0) candidates.add(i);
     }
-  }
+    candidates.sort((a, b) => _best[b].compareTo(_best[a]));
 
-  // Sort by confidence descending
-  candidates
-      .sort((a, b) => (b['confidence'] as double).compareTo(a['confidence'] as double));
-
-  // NMS
-  final results = <Map<String, dynamic>>[];
-  for (final c in candidates) {
-    bool keep = true;
-    for (final k in results) {
-      if (_iouMaps(c, k) > iouThreshold) {
-        keep = false;
-        break;
+    final kept = <int>[];
+    for (final int i in candidates) {
+      bool keep = true;
+      for (final int k in kept) {
+        if (_iou(o, i, k) > _kIouThreshold) {
+          keep = false;
+          break;
+        }
       }
+      if (keep) kept.add(i);
+      if (kept.length >= _kMaxDetections) break;
     }
-    if (keep) results.add(c);
-    if (results.length >= maxDetections) break;
+
+    return kept
+        .map<Map<String, dynamic>>((int i) => <String, dynamic>{
+              'label': _labels[_cls[i]],
+              'confidence': _best[i].toDouble(),
+              'cx': o[i].clamp(0.0, 1.0).toDouble(),
+              'cy': o[n + i].clamp(0.0, 1.0).toDouble(),
+              'w': o[2 * n + i].clamp(0.0, 1.0).toDouble(),
+              'h': o[3 * n + i].clamp(0.0, 1.0).toDouble(),
+            })
+        .toList();
   }
 
-  return results;
+  static double _iou(Float32List o, int a, int b) {
+    const int n = _kNumAnchors;
+    final double acx = o[a],
+        acy = o[n + a],
+        aw = o[2 * n + a],
+        ah = o[3 * n + a];
+    final double bcx = o[b],
+        bcy = o[n + b],
+        bw = o[2 * n + b],
+        bh = o[3 * n + b];
+
+    final double ix1 = math.max(acx - aw / 2, bcx - bw / 2);
+    final double iy1 = math.max(acy - ah / 2, bcy - bh / 2);
+    final double ix2 = math.min(acx + aw / 2, bcx + bw / 2);
+    final double iy2 = math.min(acy + ah / 2, bcy + bh / 2);
+
+    final double iw = ix2 - ix1;
+    final double ih = iy2 - iy1;
+    if (iw <= 0 || ih <= 0) return 0.0;
+
+    final double inter = iw * ih;
+    final double union = aw * ah + bw * bh - inter;
+    return union <= 0 ? 0.0 : inter / union;
+  }
 }
-
-double _iouMaps(Map<String, dynamic> a, Map<String, dynamic> b) {
-  final ax1 = (a['cx'] as double) - (a['w'] as double) / 2;
-  final ay1 = (a['cy'] as double) - (a['h'] as double) / 2;
-  final ax2 = (a['cx'] as double) + (a['w'] as double) / 2;
-  final ay2 = (a['cy'] as double) + (a['h'] as double) / 2;
-
-  final bx1 = (b['cx'] as double) - (b['w'] as double) / 2;
-  final by1 = (b['cy'] as double) - (b['h'] as double) / 2;
-  final bx2 = (b['cx'] as double) + (b['w'] as double) / 2;
-  final by2 = (b['cy'] as double) + (b['h'] as double) / 2;
-
-  final ix1 = ax1 > bx1 ? ax1 : bx1;
-  final iy1 = ay1 > by1 ? ay1 : by1;
-  final ix2 = ax2 < bx2 ? ax2 : bx2;
-  final iy2 = ay2 < by2 ? ay2 : by2;
-
-  final iw = ix2 - ix1;
-  final ih = iy2 - iy1;
-  if (iw <= 0 || ih <= 0) return 0.0;
-
-  final intersection = iw * ih;
-  final aArea = (a['w'] as double) * (a['h'] as double);
-  final bArea = (b['w'] as double) * (b['h'] as double);
-  final union = aArea + bArea - intersection;
-  return union <= 0 ? 0.0 : intersection / union;
-}
-
-const int _kInputSize = 640;
-const int _kNumAnchors = 8400;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// YoloDetector — public API (unchanged from previous version)
+// YoloDetector — public API (UI isolate side)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class YoloDetector {
-  // Worker isolate state
   Isolate? _isolate;
   SendPort? _workerPort;
   bool _isolateReady = false;
   bool _isInferring = false;
+  Future<void>? _initFuture;
 
-  // Labels are kept on the main isolate for test access
   List<String>? _labels;
 
-  // ── Public getters ────────────────────────────────────────────────────────
+  int _lastPreMs = 0;
+  int _lastInfMs = 0;
+  int _lastPostMs = 0;
+  int _frameCount = 0;
 
   bool get isInferring => _isInferring;
   bool get isInitialized => _isolateReady && _labels != null;
@@ -308,60 +481,79 @@ class YoloDetector {
   /// Exposed for tests only.
   List<String>? get labels => _labels;
 
+  /// Timings of the last processed frame (milliseconds, measured in the worker).
+  int get lastPreprocessMs => _lastPreMs;
+  int get lastInferenceMs => _lastInfMs;
+  int get lastPostprocessMs => _lastPostMs;
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  Future<void> init() async {
-    if (isInitialized) return;
+  /// Idempotent and safe to call concurrently (a second call joins the first).
+  Future<void> init() {
+    if (isInitialized) return Future<void>.value();
+    return _initFuture ??= _init().whenComplete(() => _initFuture = null);
+  }
+
+  Future<void> _init() async {
     try {
-      // Load model bytes and labels on the main isolate (rootBundle available)
-      final byteData =
-          await rootBundle.load('assets/models/yolov8n.tflite');
-      final modelBytes = byteData.buffer.asUint8List();
+      final byteData = await rootBundle.load('assets/models/yolov8n.tflite');
+      final Uint8List modelBytes = byteData.buffer
+          .asUint8List(byteData.offsetInBytes, byteData.lengthInBytes);
 
       final labelsRaw =
           await rootBundle.loadString('assets/models/yolov8n.txt');
-      _labels =
-          labelsRaw.split('\n').where((s) => s.trim().isNotEmpty).toList();
+      // trim(): the label file uses Windows line endings (\r\n).
+      final labels = labelsRaw
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
 
-      // Spawn the persistent inference isolate
       final receivePort = ReceivePort();
       _isolate = await Isolate.spawn(
         _yoloIsolateEntry,
         receivePort.sendPort,
         debugName: 'YoloInferenceWorker',
       );
-
-      // Wait for the worker to send back its SendPort
       _workerPort = await receivePort.first as SendPort;
+      receivePort.close();
 
-      // Initialise the interpreter inside the worker
+      final int threads =
+          math.max(2, math.min(4, Platform.numberOfProcessors ~/ 2));
+
       final initReply = ReceivePort();
       _workerPort!.send(<String, dynamic>{
         'type': 'init',
         'modelBytes': modelBytes,
-        'labels': _labels,
+        'labels': labels,
+        'threads': threads,
         'replyPort': initReply.sendPort,
       });
-      final initResult = await initReply.first;
+      final dynamic initResult = await initReply.first;
       initReply.close();
 
       if (initResult == true) {
+        _labels = labels;
         _isolateReady = true;
-        debugPrint(
-          '[YoloDetector] Worker isolate ready — ${_labels!.length} classes',
-        );
+        debugPrint('[YoloDetector] Worker ready — ${labels.length} classes, '
+            '$threads threads');
       } else {
         throw Exception('[YoloDetector] Worker init failed: $initResult');
       }
     } catch (e) {
       debugPrint('[YoloDetector] Initialization error: $e');
+      _isolate?.kill(priority: Isolate.immediate);
+      _isolate = null;
+      _workerPort = null;
+      _isolateReady = false;
+      _labels = null;
       rethrow;
     }
   }
 
   void dispose() {
     _workerPort?.send(<String, dynamic>{'type': 'shutdown'});
-    _isolate?.kill(priority: Isolate.immediate);
+    _isolate?.kill(priority: Isolate.beforeNextEvent);
     _isolate = null;
     _workerPort = null;
     _isolateReady = false;
@@ -371,116 +563,104 @@ class YoloDetector {
 
   // ── Inference ─────────────────────────────────────────────────────────────
 
-  /// Runs detection on encoded JPEG bytes.
-  /// Returns immediately if not ready or another inference is in-flight.
-  Future<List<DetectionResult>> detect(Uint8List jpegBytes) async {
-    if (!_isolateReady || _workerPort == null || _isInferring) return [];
-
+  /// Preferred path: takes the raw camera frame (sensor orientation) and does
+  /// convert + rotate + resize + normalise + inference + decode in the worker.
+  ///
+  /// Returns `null` when the frame was skipped (worker busy / not ready) or
+  /// failed, and a (possibly empty) list when inference really ran. Callers
+  /// should keep showing the previous boxes on `null`.
+  Future<List<DetectionResult>?> detectYuv(YuvFrame frame) async {
+    if (!_isolateReady || _workerPort == null || _isInferring) return null;
     _isInferring = true;
     try {
-      final replyPort = ReceivePort();
-      _workerPort!.send(<String, dynamic>{
-        'type': 'infer',
-        'jpegBytes': jpegBytes,
-        'replyPort': replyPort.sendPort,
+      return await _request(<String, dynamic>{
+        'type': 'yuv',
+        'y': TransferableTypedData.fromList(<TypedData>[frame.y]),
+        'u': TransferableTypedData.fromList(<TypedData>[frame.u]),
+        'v': TransferableTypedData.fromList(<TypedData>[frame.v]),
+        'width': frame.width,
+        'height': frame.height,
+        'yRowStride': frame.yRowStride,
+        'uRowStride': frame.uRowStride,
+        'vRowStride': frame.vRowStride,
+        'uPixelStride': frame.uPixelStride,
+        'vPixelStride': frame.vPixelStride,
+        'rotation': frame.rotation,
       });
-
-      final raw = await replyPort.first as List<dynamic>;
-      replyPort.close();
-
-      final results = raw
-          .cast<Map<dynamic, dynamic>>()
-          .map((m) => DetectionResult(
-                label: m['label'] as String,
-                confidence: m['confidence'] as double,
-                boundingBox: [
-                  m['cx'] as double,
-                  m['cy'] as double,
-                  m['w'] as double,
-                  m['h'] as double,
-                ],
-              ))
-          .toList();
-
-      if (results.isNotEmpty) {
-        debugPrint(
-          '[YoloDetector] ${results.length} detection(s): '
-          '${results.take(3).map((d) => '${d.label}('
-              '${(d.confidence * 100).toStringAsFixed(0)}%,'
-              '${d.spatialPosition})').join(', ')}',
-        );
-      }
-
-      return results;
-    } catch (e) {
-      debugPrint('[YoloDetector] Inference error: $e');
-      return [];
     } finally {
       _isInferring = false;
     }
   }
 
-  /// Runs detection on a [RawFrame] (raw RGB pixel buffer).
-  ///
-  /// Preferred over [detect] for the YOLO live-camera path — it skips the
-  /// JPEG encode/decode round-trip, reducing per-frame latency by ~40–80 ms
-  /// and GC pressure by ~10 MB per frame.
-  Future<List<DetectionResult>> detectRaw(RawFrame frame) async {
-    if (!_isolateReady || _workerPort == null || _isInferring) return [];
-
+  /// Already-upright packed RGB frame (e.g. from `yuvToUprightRgb`).
+  Future<List<DetectionResult>?> detectRaw(RawFrame frame) async {
+    if (!_isolateReady || _workerPort == null || _isInferring) return null;
     _isInferring = true;
     try {
-      final replyPort = ReceivePort();
-      _workerPort!.send(<String, dynamic>{
-        'type': 'infer_raw',
-        'rgbBytes': frame.rgbBytes,
+      return await _request(<String, dynamic>{
+        'type': 'rgb',
+        'rgb': TransferableTypedData.fromList(<TypedData>[frame.rgbBytes]),
         'width': frame.width,
         'height': frame.height,
-        'rotation': frame.rotation,
-        'replyPort': replyPort.sendPort,
       });
-
-      final raw = await replyPort.first as List<dynamic>;
-      replyPort.close();
-
-      final results = raw
-          .cast<Map<dynamic, dynamic>>()
-          .map((m) => DetectionResult(
-                label: m['label'] as String,
-                confidence: m['confidence'] as double,
-                boundingBox: [
-                  m['cx'] as double,
-                  m['cy'] as double,
-                  m['w'] as double,
-                  m['h'] as double,
-                ],
-              ))
-          .toList();
-
-      if (results.isNotEmpty) {
-        debugPrint(
-          '[YoloDetector] ${results.length} detection(s): '
-          '${results.take(3).map((d) => '${d.label}('
-              '${(d.confidence * 100).toStringAsFixed(0)}%,'
-              '${d.spatialPosition})').join(', ')}',
-        );
-      }
-
-      return results;
-    } catch (e) {
-      debugPrint('[YoloDetector] Raw inference error: $e');
-      return [];
     } finally {
       _isInferring = false;
+    }
+  }
+
+  Future<List<DetectionResult>?> _request(Map<String, dynamic> message) async {
+    final reply = ReceivePort();
+    message['replyPort'] = reply.sendPort;
+    try {
+      _workerPort!.send(message);
+      final dynamic raw = await reply.first.timeout(const Duration(seconds: 8));
+
+      if (raw is! Map) return null;
+      if (raw['error'] != null) {
+        debugPrint('[YoloDetector] Worker error: ${raw['error']}');
+        return null;
+      }
+
+      _lastPreMs = (raw['preMs'] as num).toInt();
+      _lastInfMs = (raw['infMs'] as num).toInt();
+      _lastPostMs = (raw['postMs'] as num).toInt();
+      _frameCount++;
+      if (kDebugMode && _frameCount % 20 == 0) {
+        debugPrint('[YoloDetector] pre=${_lastPreMs}ms '
+            'inference=${_lastInfMs}ms post=${_lastPostMs}ms');
+      }
+
+      final List<dynamic> list = raw['det'] as List<dynamic>;
+      return list.map<DetectionResult>((dynamic item) {
+        final Map m = item as Map;
+        return DetectionResult(
+          label: m['label'] as String,
+          confidence: (m['confidence'] as num).toDouble(),
+          boundingBox: <double>[
+            (m['cx'] as num).toDouble(),
+            (m['cy'] as num).toDouble(),
+            (m['w'] as num).toDouble(),
+            (m['h'] as num).toDouble(),
+          ],
+        );
+      }).toList();
+    } on TimeoutException {
+      debugPrint('[YoloDetector] Inference timed out');
+      return null;
+    } catch (e) {
+      debugPrint('[YoloDetector] Inference error: $e');
+      return null;
+    } finally {
+      reply.close();
     }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // Static helpers — preserved unchanged for unit tests
+  // Static helpers — kept for unit tests
   // ─────────────────────────────────────────────────────────────────────────
 
   /// Converts an [img.Image] to a nested NCHW [1, 3, 640, 640] float list.
-  /// Exposed as static so widget tests can call it without a live device.
+  /// (Slow; only meant for tests. The live path uses the flat worker pipeline.)
   static List<List<List<List<double>>>> preprocessImage(img.Image image) {
     final img.Image resized =
         (image.width == _kInputSize && image.height == _kInputSize)
@@ -511,17 +691,21 @@ class YoloDetector {
     ];
   }
 
-  /// Decodes model output [1, 84, 8400] and applies NMS.
-  /// Exposed as static so widget tests can exercise decoding logic directly.
+  /// Decodes a nested model output [1, 84, 8400] and applies NMS.
+  ///
+  /// [normalizedCoords] must be true for the bundled TFLite model, whose
+  /// box rows are already 0..1. Pass false for a model that emits pixels (0..640).
   static List<DetectionResult> parseOutputs(
     List<List<List<double>>> output,
     List<String> labels, {
-    double confidenceThreshold = 0.25,
-    double iouThreshold = 0.45,
-    int maxDetections = 10,
+    double confidenceThreshold = _kConfThreshold,
+    double iouThreshold = _kIouThreshold,
+    int maxDetections = _kMaxDetections,
+    bool normalizedCoords = true,
   }) {
     final int numClasses = labels.length;
     final batch = output[0];
+    final double scale = normalizedCoords ? 1.0 : _kInputSize.toDouble();
 
     final candidates = <DetectionResult>[];
 
@@ -537,15 +721,17 @@ class YoloDetector {
         }
       }
 
-      if (maxConf > confidenceThreshold && classId >= 0 && classId < numClasses) {
+      if (maxConf > confidenceThreshold &&
+          classId >= 0 &&
+          classId < numClasses) {
         candidates.add(DetectionResult(
           label: labels[classId],
           confidence: maxConf,
           boundingBox: [
-            (batch[0][i] / _kInputSize).clamp(0.0, 1.0),
-            (batch[1][i] / _kInputSize).clamp(0.0, 1.0),
-            (batch[2][i] / _kInputSize).clamp(0.0, 1.0),
-            (batch[3][i] / _kInputSize).clamp(0.0, 1.0),
+            (batch[0][i] / scale).clamp(0.0, 1.0),
+            (batch[1][i] / scale).clamp(0.0, 1.0),
+            (batch[2][i] / scale).clamp(0.0, 1.0),
+            (batch[3][i] / scale).clamp(0.0, 1.0),
           ],
         ));
       }
@@ -564,15 +750,6 @@ class YoloDetector {
       }
       if (keep) nmsResults.add(res);
       if (nmsResults.length >= maxDetections) break;
-    }
-
-    if (nmsResults.isNotEmpty) {
-      debugPrint(
-        '[YoloDetector] ${nmsResults.length} detection(s): '
-        '${nmsResults.take(3).map((d) => '${d.label}('
-            '${(d.confidence * 100).toStringAsFixed(0)}%,'
-            '${d.spatialPosition})').join(', ')}',
-      );
     }
 
     return nmsResults;
@@ -599,8 +776,7 @@ class YoloDetector {
     if (width <= 0 || height <= 0) return 0.0;
 
     final intersection = width * height;
-    final union =
-        box1[2] * box1[3] + box2[2] * box2[3] - intersection;
+    final union = box1[2] * box1[3] + box2[2] * box2[3] - intersection;
     return union <= 0 ? 0.0 : intersection / union;
   }
 }

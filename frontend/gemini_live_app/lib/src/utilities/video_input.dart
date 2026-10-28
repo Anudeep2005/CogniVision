@@ -1,24 +1,22 @@
-import 'dart:developer';
 import 'dart:async';
+import 'dart:developer';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Raw-frame data carrier (used by the YOLO inference path)
+// Frame carriers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Lightweight container for one camera frame of raw RGB pixel data.
-///
-/// [rgbBytes] is a packed `width × height × 3` byte buffer in row-major order,
-/// three bytes per pixel (R, G, B).  No colour-space conversion is needed
-/// by the inference worker — it resizes and normalises directly from these bytes.
+/// Packed, upright RGB frame (`width × height × 3`, row-major, R-G-B).
 class RawFrame {
   final Uint8List rgbBytes;
   final int width;
   final int height;
-  /// Camera sensor orientation in degrees (0, 90, 180, 270).
-  /// Back-facing cameras on most Android phones return 90.
+
+  /// Kept for API compatibility. Frames produced by [yuvToUprightRgb] are
+  /// already rotated upright, so this is 0 for them.
   final int rotation;
 
   const RawFrame({
@@ -29,242 +27,18 @@ class RawFrame {
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// VideoInput
-// ─────────────────────────────────────────────────────────────────────────────
-
-class VideoInput extends ChangeNotifier {
-  late List<CameraDescription> _cameras;
-  CameraController? _cameraController;
-
-  StreamController<Uint8List>? _imageStreamController;
-  StreamController<RawFrame>? _rawStreamController;
-
-  bool _isStreaming = false;
-  bool _initialized = false;
-  bool get isInitialized => _initialized;
-  bool _processingFrame = false;
-
-  int _lastFrameTime = 0;
-
-  Future<void> init() async {
-    // Idempotent: only initialize once; call dispose() first to reinitialize.
-    if (_initialized) return;
-    try {
-      _cameras = await availableCameras();
-
-      _cameraController = CameraController(
-        _cameras[0],
-        ResolutionPreset.medium, // medium gives better inference quality than low
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-
-      await _cameraController!.initialize();
-      _initialized = true;
-      notifyListeners();
-      log('[VideoInput] Camera initialized: ${_cameras[0].name}');
-    } catch (e) {
-      log('[VideoInput] Camera init error: $e');
-      rethrow;
-    }
-  }
-
-  /// Returns the underlying [CameraController].
-  /// Throws [StateError] if not yet initialized.
-  CameraController get cameraController {
-    if (!_initialized || _cameraController == null) {
-      throw StateError(
-          '[VideoInput] cameraController accessed before initialization.');
-    }
-    return _cameraController!;
-  }
-
-  // ── JPEG stream — used by Gemini Live ────────────────────────────────────
-
-  Stream<Uint8List> startStreamingImages({int minIntervalMs = 250}) {
-    // Guard: must be initialized before streaming
-    if (!_initialized || _cameraController == null) {
-      throw StateError(
-          '[VideoInput] startStreamingImages() called before init().');
-    }
-
-    // If already streaming, return existing stream
-    if (_isStreaming && _imageStreamController != null) {
-      return _imageStreamController!.stream;
-    }
-
-    _imageStreamController?.close();
-    _imageStreamController = StreamController<Uint8List>.broadcast();
-
-    _isStreaming = true;
-    _processingFrame = false;
-    _lastFrameTime = 0;
-
-    // Guard: don't call startImageStream if already streaming at camera level
-    if (!_cameraController!.value.isStreamingImages) {
-      _cameraController!.startImageStream((CameraImage image) async {
-        if (_processingFrame) return;
-        if (!_isStreaming) return;
-
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - _lastFrameTime < minIntervalMs) return;
-
-        _lastFrameTime = now;
-        _processingFrame = true;
-
-        try {
-          final jpeg = await compute(_convertYuvParamsToJpeg, _YuvParams(
-            width: image.width,
-            height: image.height,
-            yBytes: image.planes[0].bytes,
-            uBytes: image.planes[1].bytes,
-            vBytes: image.planes[2].bytes,
-            yRowStride: image.planes[0].bytesPerRow,
-            uRowStride: image.planes[1].bytesPerRow,
-            vRowStride: image.planes[2].bytesPerRow,
-            uPixelStride: image.planes[1].bytesPerPixel ?? 1,
-            vPixelStride: image.planes[2].bytesPerPixel ?? 1,
-          ));
-          if (_isStreaming &&
-              _imageStreamController != null &&
-              !_imageStreamController!.isClosed) {
-            _imageStreamController!.add(jpeg);
-          }
-        } catch (e) {
-          log('[VideoInput] Frame conversion error: $e');
-        } finally {
-          _processingFrame = false;
-        }
-      });
-    }
-
-    return _imageStreamController!.stream;
-  }
-
-  // ── Raw-RGB stream — used by the YOLO inference path ─────────────────────
-
-  /// Returns a [Stream<RawFrame>] of raw RGB pixel buffers at most once every
-  /// [minIntervalMs] milliseconds.
-  ///
-  /// Emitting raw pixels (no JPEG encode/decode) eliminates ~40–80 ms of
-  /// per-frame codec overhead and reduces per-frame GC pressure from ~12 MB
-  /// to ~2.5 MB.  The inference worker resizes and normalises the raw buffer
-  /// directly without a JPEG round-trip.
-  Stream<RawFrame> startStreamingRawFrames({int minIntervalMs = 250}) {
-    if (!_initialized || _cameraController == null) {
-      throw StateError(
-          '[VideoInput] startStreamingRawFrames() called before init().');
-    }
-
-    // If already streaming raw frames, return existing stream
-    if (_isStreaming && _rawStreamController != null) {
-      return _rawStreamController!.stream;
-    }
-
-    _rawStreamController?.close();
-    _rawStreamController = StreamController<RawFrame>.broadcast();
-
-    _isStreaming = true;
-    _processingFrame = false;
-    _lastFrameTime = 0;
-
-    if (!_cameraController!.value.isStreamingImages) {
-      // Query once so the closure captures a plain int (no API calls per frame).
-      final int sensorRotation =
-          _cameraController?.description.sensorOrientation ?? 0;
-
-      _cameraController!.startImageStream((CameraImage image) async {
-        if (_processingFrame) return;
-        if (!_isStreaming) return;
-
-        final now = DateTime.now().millisecondsSinceEpoch;
-        if (now - _lastFrameTime < minIntervalMs) return;
-
-        _lastFrameTime = now;
-        _processingFrame = true;
-
-        try {
-          final frame = await compute(_convertYuvToRawFrame, _YuvParams(
-            width: image.width,
-            height: image.height,
-            yBytes: image.planes[0].bytes,
-            uBytes: image.planes[1].bytes,
-            vBytes: image.planes[2].bytes,
-            yRowStride: image.planes[0].bytesPerRow,
-            uRowStride: image.planes[1].bytesPerRow,
-            vRowStride: image.planes[2].bytesPerRow,
-            uPixelStride: image.planes[1].bytesPerPixel ?? 1,
-            vPixelStride: image.planes[2].bytesPerPixel ?? 1,
-            rotation: sensorRotation,
-          ));
-          if (_isStreaming &&
-              _rawStreamController != null &&
-              !_rawStreamController!.isClosed) {
-            _rawStreamController!.add(frame);
-          }
-        } catch (e) {
-          log('[VideoInput] Raw frame conversion error: $e');
-        } finally {
-          _processingFrame = false;
-        }
-      });
-    }
-
-    return _rawStreamController!.stream;
-  }
-
-  Future<void> stopStreamingImages() async {
-    if (!_isStreaming) return;
-
-    _isStreaming = false;
-
-    try {
-      if (_cameraController != null &&
-          _cameraController!.value.isInitialized &&
-          _cameraController!.value.isStreamingImages) {
-        await _cameraController!.stopImageStream();
-      }
-    } catch (e) {
-      log('[VideoInput] stopImageStream error: $e');
-    }
-
-    await _imageStreamController?.close();
-    _imageStreamController = null;
-
-    await _rawStreamController?.close();
-    _rawStreamController = null;
-
-    _processingFrame = false;
-  }
-
-  @override
-  void dispose() {
-    _imageStreamController?.close();
-    _imageStreamController = null;
-
-    _rawStreamController?.close();
-    _rawStreamController = null;
-
-    if (_initialized && _cameraController != null) {
-      _cameraController!.dispose();
-    }
-    _initialized = false;
-
-    super.dispose();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// YUV parameter bundle (shared by both conversion functions)
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _YuvParams {
+/// One camera frame exactly as Android delivers it (YUV420, sensor
+/// orientation). Nothing is converted here: the plane buffers are only
+/// referenced, so creating a [YuvFrame] is free.
+///
+/// [rotation] is the clockwise angle (0/90/180/270) that turns the sensor
+/// image upright in a portrait-held phone (= the camera's sensorOrientation).
+class YuvFrame {
+  final Uint8List y;
+  final Uint8List u;
+  final Uint8List v;
   final int width;
   final int height;
-  final Uint8List yBytes;
-  final Uint8List uBytes;
-  final Uint8List vBytes;
   final int yRowStride;
   final int uRowStride;
   final int vRowStride;
@@ -272,90 +46,350 @@ class _YuvParams {
   final int vPixelStride;
   final int rotation;
 
-  _YuvParams({
+  const YuvFrame({
+    required this.y,
+    required this.u,
+    required this.v,
     required this.width,
     required this.height,
-    required this.yBytes,
-    required this.uBytes,
-    required this.vBytes,
     required this.yRowStride,
     required this.uRowStride,
     required this.vRowStride,
     required this.uPixelStride,
     required this.vPixelStride,
-    this.rotation = 0,
+    required this.rotation,
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Conversion functions (top-level — required by compute())
+// VideoInput
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Converts YUV420 → JPEG.  Used by the Gemini Live path.
-Uint8List _convertYuvParamsToJpeg(_YuvParams params) {
-  final int width = params.width;
-  final int height = params.height;
+/// Owns the single [CameraController] of the Vertex tab.
+///
+/// Design rules (these exist to avoid the CameraX "too many use cases" crash):
+///  * The native image stream is started ONCE and never stopped/restarted while
+///    the camera is open. Switching between YOLO and Gemini only changes which
+///    consumer receives frames, so CameraX never re-binds use cases.
+///  * Every start/stop/init/release goes through one serial queue, so two
+///    callers can never touch the camera at the same time.
+///  * [release] fully disposes the controller. Call it when the app goes to the
+///    background or the tab becomes inactive, and call [init] again afterwards.
+class VideoInput extends ChangeNotifier {
+  List<CameraDescription> _cameras = const [];
+  CameraController? _cameraController;
+  int _sensorOrientation = 90;
 
-  final imgBuffer = img.Image(width: width, height: height);
+  bool _initialized = false;
+  bool _disposed = false;
 
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      final int yIndex = y * params.yRowStride + x;
+  // Consumers (broadcast controllers live until dispose()).
+  StreamController<Uint8List>? _jpegController;
+  StreamController<YuvFrame>? _yuvController;
 
-      final int uvRow = y >> 1;
-      final int uvCol = x >> 1;
-      final int uIndex = uvRow * params.uRowStride + uvCol * params.uPixelStride;
-      final int vIndex = uvRow * params.vRowStride + uvCol * params.vPixelStride;
+  bool _jpegActive = false;
+  bool _yuvActive = false;
+  bool _jpegBusy = false;
+  int _jpegIntervalMs = 1000;
+  int _yuvIntervalMs = 200;
+  int _lastJpegMs = 0;
+  int _lastYuvMs = 0;
 
-      final int yVal = params.yBytes[yIndex];
-      final int uVal = params.uBytes[uIndex] - 128;
-      final int vVal = params.vBytes[vIndex] - 128;
+  // Serial operation queue.
+  Future<void> _opTail = Future<void>.value();
 
-      final int r = (yVal + 1.402 * vVal).round().clamp(0, 255);
-      final int g = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
-      final int b = (yVal + 1.772 * uVal).round().clamp(0, 255);
+  bool get isInitialized => _initialized && _cameraController != null;
 
-      imgBuffer.setPixelRgba(x, y, r, g, b, 255);
+  /// Clockwise degrees needed to make a sensor frame upright (portrait phone).
+  int get sensorOrientation => _sensorOrientation;
+
+  CameraController get cameraController {
+    final controller = _cameraController;
+    if (!_initialized || controller == null) {
+      throw StateError(
+          '[VideoInput] cameraController accessed before initialization.');
+    }
+    return controller;
+  }
+
+  Future<T> _serial<T>(Future<T> Function() op) {
+    final completer = Completer<T>();
+    _opTail = _opTail.then((_) async {
+      try {
+        completer.complete(await op());
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    return completer.future;
+  }
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  /// Opens the back camera. Idempotent; safe to call repeatedly.
+  Future<void> init() => _serial<void>(_initLocked);
+
+  Future<void> _initLocked() async {
+    if (_disposed) return;
+    if (_initialized && _cameraController != null) return;
+    try {
+      if (_cameras.isEmpty) {
+        _cameras = await availableCameras();
+      }
+      if (_cameras.isEmpty) {
+        throw StateError('No cameras found on this device.');
+      }
+
+      final camera = _cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => _cameras.first,
+      );
+      _sensorOrientation = camera.sensorOrientation;
+
+      final controller = CameraController(
+        camera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+      await controller.initialize();
+
+      _cameraController = controller;
+      _initialized = true;
+      _notify();
+      log('[VideoInput] Camera initialized: ${camera.name} '
+          '(sensorOrientation=$_sensorOrientation)');
+    } catch (e) {
+      log('[VideoInput] Camera init error: $e');
+      rethrow;
     }
   }
 
-  return Uint8List.fromList(img.encodeJpg(imgBuffer, quality: 75));
+  /// Stops the image stream and fully disposes the camera.
+  /// Call when the app is backgrounded or the Vertex tab becomes inactive.
+  Future<void> release() => _serial<void>(() async {
+        _jpegActive = false;
+        _yuvActive = false;
+        _jpegBusy = false;
+        final controller = _cameraController;
+        _cameraController = null;
+        _initialized = false;
+        await _shutdownController(controller);
+        _notify();
+        log('[VideoInput] Camera released');
+      });
+
+  static Future<void> _shutdownController(CameraController? controller) async {
+    if (controller == null) return;
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (e) {
+      log('[VideoInput] stopImageStream error: $e');
+    }
+    try {
+      await controller.dispose();
+    } catch (e) {
+      log('[VideoInput] controller dispose error: $e');
+    }
+  }
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  // ── Consumers ─────────────────────────────────────────────────────────────
+
+  /// JPEG frames (upright) for Gemini Live.
+  Future<Stream<Uint8List>> startStreamingImages(
+      {int minIntervalMs = 1000}) async {
+    _jpegController ??= StreamController<Uint8List>.broadcast();
+    _jpegIntervalMs = minIntervalMs;
+    _lastJpegMs = 0;
+    _jpegActive = true;
+    try {
+      await _ensureImageStream();
+    } catch (e) {
+      _jpegActive = false;
+      rethrow;
+    }
+    return _jpegController!.stream;
+  }
+
+  /// Raw YUV frames for on-device YOLO. Zero conversion work happens here.
+  Future<Stream<YuvFrame>> startStreamingYuvFrames(
+      {int minIntervalMs = 200}) async {
+    _yuvController ??= StreamController<YuvFrame>.broadcast();
+    _yuvIntervalMs = minIntervalMs;
+    _lastYuvMs = 0;
+    _yuvActive = true;
+    try {
+      await _ensureImageStream();
+    } catch (e) {
+      _yuvActive = false;
+      rethrow;
+    }
+    return _yuvController!.stream;
+  }
+
+  /// Stops delivering frames to every consumer. The camera and its native
+  /// image stream stay open on purpose (no CameraX re-binding). Use
+  /// [release] to actually free the camera.
+  Future<void> stopStreamingImages() async {
+    _jpegActive = false;
+    _yuvActive = false;
+  }
+
+  Future<void> _ensureImageStream() => _serial<void>(() async {
+        final controller = _cameraController;
+        if (controller == null || !_initialized) {
+          throw StateError('[VideoInput] start*() called before init().');
+        }
+        if (controller.value.isStreamingImages) return;
+        await controller.startImageStream(_onCameraImage);
+      });
+
+  // ── Per-frame callback (runs on the main isolate – keep it tiny) ──────────
+
+  void _onCameraImage(CameraImage image) {
+    if (_disposed) return;
+
+    final yuvCtl = _yuvController;
+    final jpegCtl = _jpegController;
+    final bool wantYuv = _yuvActive && yuvCtl != null && !yuvCtl.isClosed;
+    final bool wantJpeg =
+        _jpegActive && !_jpegBusy && jpegCtl != null && !jpegCtl.isClosed;
+    if (!wantYuv && !wantJpeg) return;
+
+    final int now = DateTime.now().millisecondsSinceEpoch;
+    final bool yuvDue = wantYuv && now - _lastYuvMs >= _yuvIntervalMs;
+    final bool jpegDue = wantJpeg && now - _lastJpegMs >= _jpegIntervalMs;
+    if (!yuvDue && !jpegDue) return;
+
+    final planes = image.planes;
+    if (planes.length < 3) return; // not a 3-plane YUV frame
+
+    final frame = YuvFrame(
+      y: planes[0].bytes,
+      u: planes[1].bytes,
+      v: planes[2].bytes,
+      width: image.width,
+      height: image.height,
+      yRowStride: planes[0].bytesPerRow,
+      uRowStride: planes[1].bytesPerRow,
+      vRowStride: planes[2].bytesPerRow,
+      uPixelStride: planes[1].bytesPerPixel ?? 1,
+      vPixelStride: planes[2].bytesPerPixel ?? 1,
+      rotation: _sensorOrientation,
+    );
+
+    if (yuvDue) {
+      _lastYuvMs = now;
+      yuvCtl!.add(frame);
+    }
+    if (jpegDue) {
+      _lastJpegMs = now;
+      _jpegBusy = true;
+      unawaited(_encodeJpeg(frame));
+    }
+  }
+
+  Future<void> _encodeJpeg(YuvFrame frame) async {
+    try {
+      // 1 fps → a throw-away isolate per frame is cheap and keeps the UI free.
+      final jpeg = await compute(_yuvFrameToJpeg, frame);
+      final ctl = _jpegController;
+      if (_jpegActive && !_disposed && ctl != null && !ctl.isClosed) {
+        ctl.add(jpeg);
+      }
+    } catch (e) {
+      log('[VideoInput] JPEG encode error: $e');
+    } finally {
+      _jpegBusy = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _jpegActive = false;
+    _yuvActive = false;
+
+    final controller = _cameraController;
+    _cameraController = null;
+    _initialized = false;
+    unawaited(_shutdownController(controller));
+
+    _jpegController?.close();
+    _jpegController = null;
+    _yuvController?.close();
+    _yuvController = null;
+
+    super.dispose();
+  }
 }
 
-/// Converts YUV420 → packed RGB [RawFrame].  Used by the YOLO inference path.
-///
-/// Skips JPEG encoding entirely: the resulting [RawFrame.rgbBytes] is a flat
-/// `width × height × 3` buffer that the inference worker reads directly.
-RawFrame _convertYuvToRawFrame(_YuvParams params) {
-  final int width = params.width;
-  final int height = params.height;
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversion (top-level: usable from compute())
+// ─────────────────────────────────────────────────────────────────────────────
 
-  final rgb = Uint8List(width * height * 3);
-  int out = 0;
+int _normalizeRotation(int degrees) =>
+    ((((degrees % 360) + 360) % 360) ~/ 90) * 90;
 
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      final int yIndex = y * params.yRowStride + x;
+/// YUV420 → upright packed RGB. Integer BT.601; rotates clockwise by
+/// [YuvFrame.rotation] while converting (no extra pass).
+RawFrame yuvToUprightRgb(YuvFrame f) {
+  final int w = f.width;
+  final int h = f.height;
+  final int rot = _normalizeRotation(f.rotation);
+  final bool transposed = rot == 90 || rot == 270;
+  final int ow = transposed ? h : w;
+  final int oh = transposed ? w : h;
 
+  final Uint8List rgb = Uint8List(ow * oh * 3);
+  int o = 0;
+
+  for (int oy = 0; oy < oh; oy++) {
+    for (int ox = 0; ox < ow; ox++) {
+      final int x;
+      final int y;
+      if (!transposed) {
+        x = rot == 0 ? ox : w - 1 - ox;
+        y = rot == 0 ? oy : h - 1 - oy;
+      } else {
+        x = rot == 90 ? oy : w - 1 - oy;
+        y = rot == 90 ? h - 1 - ox : ox;
+      }
+
+      final int yv = f.y[y * f.yRowStride + x];
       final int uvRow = y >> 1;
       final int uvCol = x >> 1;
-      final int uIndex = uvRow * params.uRowStride + uvCol * params.uPixelStride;
-      final int vIndex = uvRow * params.vRowStride + uvCol * params.vPixelStride;
+      final int uv = f.u[uvRow * f.uRowStride + uvCol * f.uPixelStride] - 128;
+      final int vv = f.v[uvRow * f.vRowStride + uvCol * f.vPixelStride] - 128;
 
-      final int yVal = params.yBytes[yIndex];
-      final int uVal = params.uBytes[uIndex] - 128;
-      final int vVal = params.vBytes[vIndex] - 128;
+      final int r = yv + ((1436 * vv) >> 10);
+      final int g = yv - ((352 * uv + 731 * vv) >> 10);
+      final int b = yv + ((1815 * uv) >> 10);
 
-      rgb[out++] = (yVal + 1.402 * vVal).round().clamp(0, 255);
-      rgb[out++] = (yVal - 0.344136 * uVal - 0.714136 * vVal).round().clamp(0, 255);
-      rgb[out++] = (yVal + 1.772 * uVal).round().clamp(0, 255);
+      rgb[o++] = r < 0 ? 0 : (r > 255 ? 255 : r);
+      rgb[o++] = g < 0 ? 0 : (g > 255 ? 255 : g);
+      rgb[o++] = b < 0 ? 0 : (b > 255 ? 255 : b);
     }
   }
 
-  return RawFrame(
-    rgbBytes: rgb,
-    width: width,
-    height: height,
-    rotation: params.rotation,
+  return RawFrame(rgbBytes: rgb, width: ow, height: oh);
+}
+
+/// Gemini path: upright RGB → JPEG.
+Uint8List _yuvFrameToJpeg(YuvFrame f) {
+  final rgb = yuvToUprightRgb(f);
+  final image = img.Image.fromBytes(
+    width: rgb.width,
+    height: rgb.height,
+    bytes: rgb.rgbBytes.buffer,
+    numChannels: 3,
+    order: img.ChannelOrder.rgb,
   );
+  return img.encodeJpg(image, quality: 70);
 }

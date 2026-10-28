@@ -152,15 +152,15 @@ class TtsService {
     Duration cooldown = const Duration(milliseconds: 4000),
     Duration repeatCooldown = const Duration(milliseconds: 8000),
     bool hasNewlyAppearedLabel = false,
+    bool hasDirectionChanged = false,
   }) {
     if (newPhrase == null || newPhrase.isEmpty) return false;
     if (isSpeaking) return false;
 
     if (lastSpokenTime != null) {
       final elapsed = currentTime.difference(lastSpokenTime);
-      // If an object newly appeared in the frame, override the cooldown so
-      // the user is warned promptly even if a phrase was recently spoken.
-      if (hasNewlyAppearedLabel && newPhrase != lastPhrase) {
+      // Bypass cooldown if the spatial direction has changed or a new label appeared.
+      if ((hasNewlyAppearedLabel || hasDirectionChanged) && newPhrase != lastPhrase) {
         return true;
       }
       if (elapsed < cooldown) {
@@ -196,6 +196,12 @@ class TtsService {
         currentLabels.any((l) => !_previousLabels.contains(l));
     _previousLabels = currentLabels;
 
+    // Detect direction change: same label set as last announcement but phrase
+    // differs means the object moved (e.g. left → ahead → right).
+    final hasDirectionChanged = _lastSpokenPhrase != null &&
+        phrase != _lastSpokenPhrase &&
+        !hasNewlyAppearedLabel;
+
     final eligible = shouldAnnounce(
       newPhrase: phrase,
       lastPhrase: _lastSpokenPhrase,
@@ -205,6 +211,7 @@ class TtsService {
       cooldown: cooldown,
       repeatCooldown: repeatCooldown,
       hasNewlyAppearedLabel: hasNewlyAppearedLabel,
+      hasDirectionChanged: hasDirectionChanged,
     );
 
     if (!eligible) return;

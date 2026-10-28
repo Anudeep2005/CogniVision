@@ -40,24 +40,29 @@ void main() {
 
     test('DetectionResult.spatialPosition classifies horizontal position', () {
       // left region
-      final left = DetectionResult(label: 'a', confidence: 0.9, boundingBox: [0.1, 0.5, 0.1, 0.1]);
+      final left = DetectionResult(
+          label: 'a', confidence: 0.9, boundingBox: [0.1, 0.5, 0.1, 0.1]);
       expect(left.spatialPosition, 'left');
       // centre region
-      final centre = DetectionResult(label: 'b', confidence: 0.9, boundingBox: [0.5, 0.5, 0.1, 0.1]);
+      final centre = DetectionResult(
+          label: 'b', confidence: 0.9, boundingBox: [0.5, 0.5, 0.1, 0.1]);
       expect(centre.spatialPosition, 'centre');
       // right region
-      final right = DetectionResult(label: 'c', confidence: 0.9, boundingBox: [0.8, 0.5, 0.1, 0.1]);
+      final right = DetectionResult(
+          label: 'c', confidence: 0.9, boundingBox: [0.8, 0.5, 0.1, 0.1]);
       expect(right.spatialPosition, 'right');
     });
 
-    test('preprocessImage creates NCHW [1, 3, 640, 640] nested list with correct channel values', () {
+    test(
+        'preprocessImage creates NCHW [1, 3, 640, 640] nested list with correct channel values',
+        () {
       final testImg = img.Image(width: 640, height: 640);
       testImg.setPixelRgb(0, 0, 255, 128, 64);
 
       // Returns List<List<List<List<double>>>> with shape [1, 3, 640, 640]
       final buffer = YoloDetector.preprocessImage(testImg);
-      expect(buffer.length, 1);       // batch
-      expect(buffer[0].length, 3);    // channels
+      expect(buffer.length, 1); // batch
+      expect(buffer[0].length, 3); // channels
       expect(buffer[0][0].length, 640); // height
       expect(buffer[0][0][0].length, 640); // width
 
@@ -72,7 +77,10 @@ void main() {
     // Helper: build a [1, 84, 8400] nested output list with specific anchor values
     List<List<List<double>>> buildOutputBuffer({
       required int anchor,
-      required double cx, required double cy, required double w, required double h,
+      required double cx,
+      required double cy,
+      required double w,
+      required double h,
       required int classId,
       required double conf,
     }) {
@@ -89,13 +97,20 @@ void main() {
       return out;
     }
 
-    test('parseOutputs decodes anchors, normalizes coords, and filters low confidence', () {
+    test(
+        'parseOutputs decodes anchors, normalizes coords, and filters low confidence',
+        () {
       final labels = ['person', 'bicycle', 'car'];
 
       // Build output with anchor 100: person conf=0.90, cx=320, cy=320, w=160, h=320
       final output = buildOutputBuffer(
-        anchor: 100, cx: 320.0, cy: 320.0, w: 160.0, h: 320.0,
-        classId: 0, conf: 0.90,
+        anchor: 100,
+        cx: 320.0,
+        cy: 320.0,
+        w: 160.0,
+        h: 320.0,
+        classId: 0,
+        conf: 0.90,
       );
       // Anchor 200: car conf=0.20 (below 0.25 threshold — should be filtered)
       output[0][0][200] = 100.0;
@@ -104,7 +119,8 @@ void main() {
       output[0][3][200] = 50.0;
       output[0][4 + 2][200] = 0.20;
 
-      final detections = YoloDetector.parseOutputs(output, labels);
+      final detections =
+          YoloDetector.parseOutputs(output, labels, normalizedCoords: false);
 
       expect(detections.length, 1);
       expect(detections.first.label, 'person');
@@ -112,10 +128,12 @@ void main() {
       expect(detections.first.boundingBox[0], closeTo(0.5, 1e-4)); // cx
       expect(detections.first.boundingBox[1], closeTo(0.5, 1e-4)); // cy
       expect(detections.first.boundingBox[2], closeTo(0.25, 1e-4)); // w
-      expect(detections.first.boundingBox[3], closeTo(0.5, 1e-4));  // h
+      expect(detections.first.boundingBox[3], closeTo(0.5, 1e-4)); // h
     });
 
-    test('parseOutputs applies NMS to suppress overlapping duplicate detections', () {
+    test(
+        'parseOutputs applies NMS to suppress overlapping duplicate detections',
+        () {
       final labels = ['person', 'bicycle'];
 
       // Anchor 10: person (conf 0.95, cx=320, cy=320, w=100, h=100)
@@ -136,7 +154,8 @@ void main() {
       output[0][3][11] = 100.0;
       output[0][4 + 0][11] = 0.80;
 
-      final detections = YoloDetector.parseOutputs(output, labels);
+      final detections =
+          YoloDetector.parseOutputs(output, labels, normalizedCoords: false);
 
       // NMS should suppress Anchor 11, leaving only the higher confidence detection
       expect(detections.length, 1);
@@ -156,15 +175,24 @@ void main() {
   // ── YoloPainter unit tests ───────────────────────────────────────────────
   group('YoloPainter', () {
     test('shouldRepaint returns true when detections differ', () {
-      final d1 = [DetectionResult(label: 'person', confidence: 0.9, boundingBox: [0.5, 0.5, 0.2, 0.4])];
-      final d2 = [DetectionResult(label: 'chair', confidence: 0.8, boundingBox: [0.2, 0.2, 0.1, 0.1])];
+      final d1 = [
+        DetectionResult(
+            label: 'person', confidence: 0.9, boundingBox: [0.5, 0.5, 0.2, 0.4])
+      ];
+      final d2 = [
+        DetectionResult(
+            label: 'chair', confidence: 0.8, boundingBox: [0.2, 0.2, 0.1, 0.1])
+      ];
       final painter1 = YoloPainter(d1, previewSize: const Size(480, 640));
       final painter2 = YoloPainter(d2, previewSize: const Size(480, 640));
       expect(painter1.shouldRepaint(painter2), true);
     });
 
     test('shouldRepaint returns false for identical instances', () {
-      final d = [DetectionResult(label: 'person', confidence: 0.9, boundingBox: [0.5, 0.5, 0.2, 0.4])];
+      final d = [
+        DetectionResult(
+            label: 'person', confidence: 0.9, boundingBox: [0.5, 0.5, 0.2, 0.4])
+      ];
       final painter1 = YoloPainter(d, previewSize: const Size(480, 640));
       final painter2 = YoloPainter(d, previewSize: const Size(480, 640));
       expect(painter1.shouldRepaint(painter2), false);
@@ -185,38 +213,71 @@ void main() {
 
     test('buildSpatialAnnouncement formats single obstacle cleanly', () {
       final single = [
-        DetectionResult(label: 'person', confidence: 0.92, boundingBox: [0.5, 0.5, 0.2, 0.4]),
+        DetectionResult(
+            label: 'person',
+            confidence: 0.92,
+            boundingBox: [0.5, 0.5, 0.2, 0.4]),
       ];
       expect(TtsService.buildSpatialAnnouncement(single), 'A person is ahead.');
     });
 
-    test('buildSpatialAnnouncement formats single obstacle starting with vowel', () {
+    test('buildSpatialAnnouncement formats single obstacle starting with vowel',
+        () {
       final single = [
-        DetectionResult(label: 'orange', confidence: 0.80, boundingBox: [0.1, 0.5, 0.2, 0.2]),
+        DetectionResult(
+            label: 'orange',
+            confidence: 0.80,
+            boundingBox: [0.1, 0.5, 0.2, 0.2]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(single), 'An orange is on your left.');
+      expect(TtsService.buildSpatialAnnouncement(single),
+          'An orange is on your left.');
     });
 
-    test('buildSpatialAnnouncement formats two same-label obstacles in same direction', () {
+    test(
+        'buildSpatialAnnouncement formats two same-label obstacles in same direction',
+        () {
       final sameDir = [
-        DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
-        DetectionResult(label: 'person', confidence: 0.88, boundingBox: [0.4, 0.5, 0.2, 0.2]),
+        DetectionResult(
+            label: 'person',
+            confidence: 0.95,
+            boundingBox: [0.5, 0.5, 0.2, 0.4]),
+        DetectionResult(
+            label: 'person',
+            confidence: 0.88,
+            boundingBox: [0.4, 0.5, 0.2, 0.2]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(sameDir), 'Two persons are ahead.');
+      expect(TtsService.buildSpatialAnnouncement(sameDir),
+          'Two persons are ahead.');
     });
 
-    test('buildSpatialAnnouncement formats two obstacles in same direction', () {
+    test('buildSpatialAnnouncement formats two obstacles in same direction',
+        () {
       final sameDir = [
-        DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
-        DetectionResult(label: 'chair', confidence: 0.88, boundingBox: [0.4, 0.5, 0.2, 0.2]),
+        DetectionResult(
+            label: 'person',
+            confidence: 0.95,
+            boundingBox: [0.5, 0.5, 0.2, 0.4]),
+        DetectionResult(
+            label: 'chair',
+            confidence: 0.88,
+            boundingBox: [0.4, 0.5, 0.2, 0.2]),
       ];
-      expect(TtsService.buildSpatialAnnouncement(sameDir), 'A person and a chair are ahead.');
+      expect(TtsService.buildSpatialAnnouncement(sameDir),
+          'A person and a chair are ahead.');
     });
 
-    test('buildSpatialAnnouncement formats two obstacles in different directions', () {
+    test(
+        'buildSpatialAnnouncement formats two obstacles in different directions',
+        () {
       final diffDir = [
-        DetectionResult(label: 'person', confidence: 0.95, boundingBox: [0.5, 0.5, 0.2, 0.4]),
-        DetectionResult(label: 'chair', confidence: 0.88, boundingBox: [0.1, 0.5, 0.2, 0.2]),
+        DetectionResult(
+            label: 'person',
+            confidence: 0.95,
+            boundingBox: [0.5, 0.5, 0.2, 0.4]),
+        DetectionResult(
+            label: 'chair',
+            confidence: 0.88,
+            boundingBox: [0.1, 0.5, 0.2, 0.2]),
       ];
       expect(
         TtsService.buildSpatialAnnouncement(diffDir),
@@ -242,7 +303,9 @@ void main() {
       );
     });
 
-    test('shouldAnnounce enforces minimum cooldown between consecutive announcements', () {
+    test(
+        'shouldAnnounce enforces minimum cooldown between consecutive announcements',
+        () {
       final t0 = DateTime(2026, 1, 1, 12, 0, 0);
       final tAfter2s = t0.add(const Duration(seconds: 2));
       final tAfter5s = t0.add(const Duration(seconds: 5));
@@ -302,7 +365,9 @@ void main() {
       );
     });
 
-    test('shouldAnnounce allows announce when a new label has appeared (urgency override)', () {
+    test(
+        'shouldAnnounce allows announce when a new label has appeared (urgency override)',
+        () {
       final t0 = DateTime(2026, 1, 1, 12, 0, 0);
       final tAfter1s = t0.add(const Duration(seconds: 1));
 
@@ -317,6 +382,42 @@ void main() {
           hasNewlyAppearedLabel: true,
         ),
         true,
+      );
+    });
+
+    test('shouldAnnounce bypasses cooldown when spatial direction changed', () {
+      final t0 = DateTime(2026, 1, 1, 12, 0, 0);
+      final tAfter1s = t0.add(const Duration(seconds: 1));
+
+      // Object moved left → right within cooldown window; must still announce.
+      expect(
+        TtsService.shouldAnnounce(
+          newPhrase: "A person is on your right.",
+          lastPhrase: "A person is on your left.",
+          lastSpokenTime: t0,
+          currentTime: tAfter1s,
+          isSpeaking: false,
+          hasDirectionChanged: true,
+        ),
+        true,
+      );
+    });
+
+    test('shouldAnnounce suppresses same-direction repeat within cooldown', () {
+      final t0 = DateTime(2026, 1, 1, 12, 0, 0);
+      final tAfter1s = t0.add(const Duration(seconds: 1));
+
+      // Same phrase with hasDirectionChanged=false: must be suppressed by cooldown.
+      expect(
+        TtsService.shouldAnnounce(
+          newPhrase: "A person is ahead.",
+          lastPhrase: "A person is ahead.",
+          lastSpokenTime: t0,
+          currentTime: tAfter1s,
+          isSpeaking: false,
+          hasDirectionChanged: false,
+        ),
+        false,
       );
     });
 
@@ -385,7 +486,8 @@ void main() {
   group('AiMode & ModeTransition Coordinator', () {
     test('AiMode enum contains localYolo and cloudGemini modes', () {
       expect(AiMode.values.length, 2);
-      expect(AiMode.values, containsAll([AiMode.localYolo, AiMode.cloudGemini]));
+      expect(
+          AiMode.values, containsAll([AiMode.localYolo, AiMode.cloudGemini]));
     });
 
     test('ModeTransitionState enum contains complete lifecycle states', () {
@@ -401,7 +503,8 @@ void main() {
       );
     });
 
-    test('aiModeProvider defaults to localYolo (safe offline-first default)', () {
+    test('aiModeProvider defaults to localYolo (safe offline-first default)',
+        () {
       final container = ProviderContainer();
       addTearDown(container.dispose);
 
@@ -441,11 +544,14 @@ void main() {
       );
 
       // Transition begins
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.transitioning;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.transitioning;
       // Target mode setup completes
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.active;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.active;
       // Tab backgrounded
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.idle;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.idle;
 
       expect(transitions, [
         ModeTransitionState.transitioning,
@@ -459,30 +565,40 @@ void main() {
       addTearDown(container.dispose);
 
       // Attempting to switch to Cloud Gemini
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.transitioning;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.transitioning;
 
       // Simulated network/cloud connection failure
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.error;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.error;
       expect(container.read(modeTransitionProvider), ModeTransitionState.error);
 
       // Safe fallback recovery
       container.read(aiModeProvider.notifier).state = AiMode.localYolo;
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.active;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.active;
 
       expect(container.read(aiModeProvider), AiMode.localYolo);
-      expect(container.read(modeTransitionProvider), ModeTransitionState.active);
+      expect(
+          container.read(modeTransitionProvider), ModeTransitionState.active);
     });
 
-    test('Mutual exclusion guard: UI controls disabled during transitioning state', () {
+    test(
+        'Mutual exclusion guard: UI controls disabled during transitioning state',
+        () {
       final container = ProviderContainer();
       addTearDown(container.dispose);
 
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.transitioning;
-      final isTransitioning = container.read(modeTransitionProvider) == ModeTransitionState.transitioning;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.transitioning;
+      final isTransitioning = container.read(modeTransitionProvider) ==
+          ModeTransitionState.transitioning;
       expect(isTransitioning, isTrue);
 
-      container.read(modeTransitionProvider.notifier).state = ModeTransitionState.active;
-      final isFinished = container.read(modeTransitionProvider) == ModeTransitionState.transitioning;
+      container.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.active;
+      final isFinished = container.read(modeTransitionProvider) ==
+          ModeTransitionState.transitioning;
       expect(isFinished, isFalse);
     });
   });

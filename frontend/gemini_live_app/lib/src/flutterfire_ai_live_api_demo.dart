@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:developer';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:camera/camera.dart';
@@ -9,8 +11,12 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'ui_components/ui_components.dart';
 import 'providers.dart';
 import 'utilities/yolo_detector.dart';
-import 'utilities/video_input.dart' show RawFrame, VideoInput;
+import 'utilities/video_input.dart' show VideoInput, YuvFrame;
 import 'services/tts_service.dart';
+
+/// Minimum gap between frames handed to YOLO. The worker is the real limiter
+/// (frames are dropped while it is busy), this just avoids needless copying.
+const int _kYoloFrameIntervalMs = 100;
 
 class FlutterFireAILiveAPIDemo extends ConsumerStatefulWidget {
   const FlutterFireAILiveAPIDemo({super.key});
@@ -19,7 +25,8 @@ class FlutterFireAILiveAPIDemo extends ConsumerStatefulWidget {
   ConsumerState<FlutterFireAILiveAPIDemo> createState() => _MyHomePageState();
 }
 
-class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
+class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo>
+    with WidgetsBindingObserver {
   final LiveGenerativeModel _liveModel =
       FirebaseAI.vertexAI().liveGenerativeModel(
     model: 'gemini-2.0-flash-exp',
@@ -49,24 +56,41 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
   final YoloDetector _yoloDetector = YoloDetector();
   final TtsService _ttsService = TtsService();
-  StreamSubscription? _yoloSubscription;
-  List<DetectionResult> _detections = [];
+  StreamSubscription<YuvFrame>? _yoloSubscription;
+
+  /// Detections live in a notifier so only the overlay repaints
+  /// (previously every detection rebuilt the whole screen).
+  final ValueNotifier<List<DetectionResult>> _detectionsNotifier =
+      ValueNotifier<List<DetectionResult>>(const <DetectionResult>[]);
 
   // Unified Media Pipe for Gemini (Audio + Video)
   StreamController<InlineDataPart>? _combinedMediaController;
   StreamSubscription<Uint8List>? _micSubscription;
   StreamSubscription<Uint8List>? _cameraSubscription;
 
+  // App-lifecycle handling (release the camera when backgrounded).
+  bool _backgrounded = false;
+  bool _suspendedByLifecycle = false;
+  Future<void>? _suspendFuture;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // The camera frames are rotated by the sensor orientation assuming a
+    // portrait-held phone, and the overlay maths assumes the same. Lock it.
+    // (Move this to main() if you prefer a single app-wide place.)
+    SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+    ]);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initializeAudio();
       await _initializeVideo();
 
       // If vertex tab is active on mount, bootstrap the initial mode
-      if (ref.read(vertexActiveProvider)) {
+      if (mounted && ref.read(vertexActiveProvider)) {
         await _handleModeSwitch(ref.read(aiModeProvider));
       }
     });
@@ -74,17 +98,21 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+
     _sessionWatchdog?.cancel();
     _combinedMediaController?.close();
     _micSubscription?.cancel();
     _cameraSubscription?.cancel();
     _yoloSubscription?.cancel();
 
-    ref.read(audioInputProvider).dispose();
-    ref.read(audioOutputProvider).dispose();
-    ref.read(videoInputProvider).dispose();
+    // The notifier-based providers own their own disposal; just free hardware.
+    unawaited(ref.read(videoInputProvider).release());
+    unawaited(ref.read(audioInputProvider).stopRecording());
+    unawaited(ref.read(audioOutputProvider).dispose());
     _yoloDetector.dispose();
     _ttsService.dispose();
+    _detectionsNotifier.dispose();
 
     if (_liveSessionIsOpen) {
       unawaited(_session.close());
@@ -92,6 +120,68 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
     super.dispose();
   }
+
+  // ── App lifecycle ─────────────────────────────────────────────────────────
+  //
+  // Without this the camera session from the previous run/background stays
+  // bound and the next start fails with
+  // "No supported surface combination is found for camera device".
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      _backgrounded = true;
+      unawaited(_onBackgrounded());
+    } else if (state == AppLifecycleState.resumed) {
+      _backgrounded = false;
+      unawaited(_onForegrounded());
+    }
+  }
+
+  Future<void> _onBackgrounded() async {
+    if (!mounted || !ref.read(vertexActiveProvider)) return;
+    _suspendedByLifecycle = true;
+    _suspendFuture = _suspendPipelines();
+    await _suspendFuture;
+  }
+
+  Future<void> _onForegrounded() async {
+    await _suspendFuture;
+    if (!_suspendedByLifecycle) return;
+    _suspendedByLifecycle = false;
+    if (!mounted || !ref.read(vertexActiveProvider)) return;
+    await _handleModeSwitch(ref.read(aiModeProvider));
+  }
+
+  /// Stops the active mode and fully releases the camera.
+  Future<void> _suspendPipelines() async {
+    if (!mounted) return;
+    try {
+      if (ref.read(aiModeProvider) == AiMode.localYolo) {
+        await _teardownYolo();
+      } else {
+        await _teardownGemini();
+      }
+      await _releaseCamera();
+    } catch (e) {
+      log('Suspend error: $e');
+    }
+    if (mounted) {
+      ref.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.idle;
+    }
+  }
+
+  Future<void> _releaseCamera() async {
+    // Remove the CameraPreview from the tree BEFORE the controller is disposed.
+    if (mounted) {
+      setState(() => _cameraIsActive = false);
+    }
+    await ref.read(videoInputProvider).release();
+  }
+
+  // ── Initialisation ────────────────────────────────────────────────────────
 
   Future<void> _initializeAudio() async {
     try {
@@ -134,6 +224,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     }
   }
 
+  // ── Mode switching ────────────────────────────────────────────────────────
+
   /// Authoritative coordinator for switching AI modes with strict mutual exclusion.
   Future<void> _handleModeSwitch(AiMode targetMode) async {
     final currentMode = ref.read(aiModeProvider);
@@ -141,9 +233,11 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
 
     // Prevent re-entrant transitions and redundant switches
     if (transitionState == ModeTransitionState.transitioning) return;
-    if (currentMode == targetMode && transitionState == ModeTransitionState.active) return;
+    if (currentMode == targetMode &&
+        transitionState == ModeTransitionState.active) return;
 
-    ref.read(modeTransitionProvider.notifier).state = ModeTransitionState.transitioning;
+    ref.read(modeTransitionProvider.notifier).state =
+        ModeTransitionState.transitioning;
     if (mounted) setState(() {});
 
     try {
@@ -162,10 +256,18 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
       }
 
       ref.read(aiModeProvider.notifier).state = targetMode;
-      ref.read(modeTransitionProvider.notifier).state = ModeTransitionState.active;
+      ref.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.active;
+
+      // The app was backgrounded / the tab was left while we were switching:
+      // don't leave camera, mic or GPU work running.
+      if (_backgrounded || !ref.read(vertexActiveProvider)) {
+        await _suspendPipelines();
+      }
     } catch (e, st) {
       log("Mode switch error: $e\n$st");
-      ref.read(modeTransitionProvider.notifier).state = ModeTransitionState.error;
+      ref.read(modeTransitionProvider.notifier).state =
+          ModeTransitionState.error;
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -185,7 +287,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
         try {
           await _setupYolo();
           ref.read(aiModeProvider.notifier).state = AiMode.localYolo;
-          ref.read(modeTransitionProvider.notifier).state = ModeTransitionState.active;
+          ref.read(modeTransitionProvider.notifier).state =
+              ModeTransitionState.active;
         } catch (fallbackError) {
           log("Fallback to YOLO failed: $fallbackError");
         }
@@ -195,6 +298,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     }
   }
 
+  // ── YOLO mode ─────────────────────────────────────────────────────────────
+
   Future<void> _setupYolo() async {
     // Audio Mutual Exclusion: Ensure mic recording and SoLoud stream are stopped
     _micSubscription?.cancel();
@@ -203,38 +308,24 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     await ref.read(audioOutputProvider).stopStream();
     _audioStreamIsActive = false;
 
-    // Subsystem initialization
-    await _yoloDetector.init();
-    await _ttsService.init();
+    // Subsystem initialization (model load + TTS in parallel)
+    await Future.wait<void>([_yoloDetector.init(), _ttsService.init()]);
     _ttsService.reset();
 
+    await _startYoloStream();
+  }
+
+  /// Subscribes YOLO to the camera. The native image stream is started once
+  /// inside VideoInput and is never restarted, so there is no CameraX re-bind.
+  Future<void> _startYoloStream() async {
     final videoInput = ref.read(videoInputProvider);
-    if (!videoInput.isInitialized) {
-      await videoInput.init();
-    }
+    if (!_yoloDetector.isInitialized) await _yoloDetector.init();
+    await videoInput.init(); // idempotent
 
-    // Ensure clean image stream
-    await videoInput.stopStreamingImages();
-
-    _yoloSubscription?.cancel();
-    _yoloSubscription = videoInput
-        .startStreamingRawFrames(minIntervalMs: 250)
-        .listen((frame) async {
-      if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
-      final results = await _yoloDetector.detectRaw(frame);
-      if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
-        // Gate rebuild: only setState when detections actually changed.
-        final changed = results.length != _detections.length ||
-            !results.asMap().entries.every((e) =>
-                e.value.label == _detections[e.key].label);
-        if (changed) {
-          setState(() {
-            _detections = results;
-          });
-        }
-        await _ttsService.announceDetections(results);
-      }
-    });
+    await _yoloSubscription?.cancel();
+    final frames = await videoInput.startStreamingYuvFrames(
+        minIntervalMs: _kYoloFrameIntervalMs);
+    _yoloSubscription = frames.listen(_onYuvFrame);
 
     if (mounted) {
       setState(() {
@@ -243,38 +334,51 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     }
   }
 
+  Future<void> _onYuvFrame(YuvFrame frame) async {
+    if (!mounted || ref.read(aiModeProvider) != AiMode.localYolo) return;
+
+    final results = await _yoloDetector.detectYuv(frame);
+    // null = frame skipped (worker busy) or failed: keep the previous boxes.
+    if (results == null) return;
+
+    if (!mounted ||
+        ref.read(aiModeProvider) != AiMode.localYolo ||
+        !_cameraIsActive) {
+      return;
+    }
+
+    // Repaints only the overlay – no setState.
+    _detectionsNotifier.value = results;
+    await _ttsService.announceDetections(results);
+  }
+
   Future<void> _teardownYolo() async {
-    _yoloSubscription?.cancel();
+    await _yoloSubscription?.cancel();
     _yoloSubscription = null;
     await _ttsService.stop();
     _ttsService.reset();
     await ref.read(videoInputProvider).stopStreamingImages();
+    _detectionsNotifier.value = const <DetectionResult>[];
 
     if (mounted) {
       setState(() {
-        _detections = [];
         _cameraIsActive = false;
       });
     }
   }
 
+  // ── Gemini mode ───────────────────────────────────────────────────────────
+
   Future<void> _setupGemini() async {
     // YOLO Mutual Exclusion: Stop TTS and cancel YOLO subscription
-    _yoloSubscription?.cancel();
+    await _yoloSubscription?.cancel();
     _yoloSubscription = null;
     await _ttsService.stop();
     _ttsService.reset();
-
-    if (mounted) {
-      setState(() {
-        _detections = [];
-      });
-    }
+    _detectionsNotifier.value = const <DetectionResult>[];
 
     final videoInput = ref.read(videoInputProvider);
-    if (!videoInput.isInitialized) {
-      await videoInput.init();
-    }
+    await videoInput.init(); // idempotent
 
     // Connect Gemini Live session
     await _connectLiveSession();
@@ -290,11 +394,11 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     _sessionWatchdog?.cancel();
     _sessionWatchdog = null;
 
-    _cameraSubscription?.cancel();
+    await _cameraSubscription?.cancel();
     _cameraSubscription = null;
     await ref.read(videoInputProvider).stopStreamingImages();
 
-    _micSubscription?.cancel();
+    await _micSubscription?.cancel();
     _micSubscription = null;
     await ref.read(audioInputProvider).stopRecording();
     await ref.read(audioOutputProvider).stopStream();
@@ -337,13 +441,20 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     _sessionWatchdog = Timer.periodic(const Duration(seconds: 10), (timer) {
       final diff = DateTime.now().difference(_lastModelResponse).inSeconds;
 
-      if (diff > 25 && _liveSessionIsOpen && ref.read(aiModeProvider) == AiMode.cloudGemini) {
+      if (diff > 25 &&
+          _liveSessionIsOpen &&
+          ref.read(aiModeProvider) == AiMode.cloudGemini) {
         log("Gemini session stalled. Restarting audio/video streams...");
+
+        // Reset right away, otherwise this fires again on every tick.
+        _lastModelResponse = DateTime.now();
+        final bool cameraWasOn = _cameraIsActive;
 
         Future.microtask(() async {
           await stopVideoStream();
           await stopAudioStream();
           await startAudioStream();
+          if (cameraWasOn) await startVideoStream();
         });
       }
     });
@@ -352,7 +463,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
   }
 
   void toggleAudioStream() async {
-    if (ref.read(modeTransitionProvider) == ModeTransitionState.transitioning) return;
+    if (ref.read(modeTransitionProvider) == ModeTransitionState.transitioning)
+      return;
 
     final currentMode = ref.read(aiModeProvider);
     if (currentMode == AiMode.localYolo) {
@@ -383,7 +495,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     final audioOutput = ref.read(audioOutputProvider);
 
     // Initialize the UNIFIED pipe if it doesn't exist
-    if (_combinedMediaController == null || _combinedMediaController!.isClosed) {
+    if (_combinedMediaController == null ||
+        _combinedMediaController!.isClosed) {
       _combinedMediaController = StreamController<InlineDataPart>();
       _session.sendMediaStream(_combinedMediaController!.stream);
     }
@@ -392,8 +505,10 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     var micStream = await audioInput.startRecordingStream();
     _micSubscription?.cancel();
     _micSubscription = micStream.listen((data) {
-      if (_combinedMediaController != null && !_combinedMediaController!.isClosed) {
-        _combinedMediaController!.add(InlineDataPart('audio/pcm;rate=16000', data));
+      if (_combinedMediaController != null &&
+          !_combinedMediaController!.isClosed) {
+        _combinedMediaController!
+            .add(InlineDataPart('audio/pcm;rate=16000', data));
       }
     });
 
@@ -422,49 +537,26 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
   }
 
   void toggleVideoStream() async {
-    if (ref.read(modeTransitionProvider) == ModeTransitionState.transitioning) return;
+    if (ref.read(modeTransitionProvider) == ModeTransitionState.transitioning)
+      return;
 
     final currentMode = ref.read(aiModeProvider);
     if (currentMode == AiMode.localYolo) {
       if (_cameraIsActive) {
-        _yoloSubscription?.cancel();
+        await _yoloSubscription?.cancel();
         _yoloSubscription = null;
         await ref.read(videoInputProvider).stopStreamingImages();
+        _detectionsNotifier.value = const <DetectionResult>[];
         if (mounted) {
           setState(() {
             _cameraIsActive = false;
-            _detections = [];
           });
         }
       } else {
-        final videoInput = ref.read(videoInputProvider);
-        if (!videoInput.isInitialized) await videoInput.init();
-        if (!_yoloDetector.isInitialized) await _yoloDetector.init();
-
-        _yoloSubscription?.cancel();
-        _yoloSubscription = videoInput
-            .startStreamingRawFrames(minIntervalMs: 250)
-            .listen((frame) async {
-          if (ref.read(aiModeProvider) != AiMode.localYolo || !mounted) return;
-          final results = await _yoloDetector.detectRaw(frame);
-          if (mounted && ref.read(aiModeProvider) == AiMode.localYolo) {
-            // Gate rebuild: only setState when detections actually changed.
-            final changed = results.length != _detections.length ||
-                !results.asMap().entries.every((e) =>
-                    e.value.label == _detections[e.key].label);
-            if (changed) {
-              setState(() {
-                _detections = results;
-              });
-            }
-            await _ttsService.announceDetections(results);
-          }
-        });
-
-        if (mounted) {
-          setState(() {
-            _cameraIsActive = true;
-          });
+        try {
+          await _startYoloStream();
+        } catch (e) {
+          log('Could not start YOLO camera stream: $e');
         }
       }
     } else {
@@ -482,36 +574,38 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     }
 
     final videoInput = ref.read(videoInputProvider);
-    if (!videoInput.isInitialized) {
-      log("Camera not initialized yet. Initializing...");
-      await videoInput.init();
-    }
+    await videoInput.init(); // idempotent
 
     // Ensure pipe exists
-    if (_combinedMediaController == null || _combinedMediaController!.isClosed) {
+    if (_combinedMediaController == null ||
+        _combinedMediaController!.isClosed) {
       _combinedMediaController = StreamController<InlineDataPart>();
       _session.sendMediaStream(_combinedMediaController!.stream);
     }
 
-    _cameraSubscription?.cancel();
-    _cameraSubscription = videoInput.startStreamingImages(minIntervalMs: 1000).listen((image) {
-      // Feed into Gemini Unified Pipe
-      if (_combinedMediaController != null && !_combinedMediaController!.isClosed && _cameraIsActive) {
-        _combinedMediaController!.add(InlineDataPart('image/jpeg', image));
-      }
-
-      if (mounted) setState(() {});
-    });
+    await _cameraSubscription?.cancel();
+    _cameraIsActive = true;
+    try {
+      final jpegs = await videoInput.startStreamingImages(minIntervalMs: 1000);
+      _cameraSubscription = jpegs.listen((image) {
+        // Feed into Gemini Unified Pipe (no setState: nothing to rebuild here)
+        final pipe = _combinedMediaController;
+        if (pipe != null && !pipe.isClosed && _cameraIsActive) {
+          pipe.add(InlineDataPart('image/jpeg', image));
+        }
+      });
+    } catch (e) {
+      _cameraIsActive = false;
+      rethrow;
+    }
 
     if (mounted) {
-      setState(() {
-        _cameraIsActive = true;
-      });
+      setState(() {});
     }
   }
 
   Future<void> stopVideoStream() async {
-    _cameraSubscription?.cancel();
+    await _cameraSubscription?.cancel();
     _cameraSubscription = null;
     await ref.read(videoInputProvider).stopStreamingImages();
 
@@ -594,29 +688,38 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     log('Received tool call: $response');
   }
 
+  // ── UI ────────────────────────────────────────────────────────────────────
+
+  /// Current preview size, or null if the camera is not open (the controller
+  /// getter throws while released).
+  Size? _previewSizeOrNull(VideoInput videoInput) {
+    if (!videoInput.isInitialized) return null;
+    try {
+      return videoInput.cameraController.value.previewSize;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // Listen for activation state changes (Tab switching)
     ref.listen<bool>(vertexActiveProvider, (previous, next) async {
       if (next) {
-        // Tab became active: activate current mode
+        // Tab became active: re-open the camera and activate the current mode
         await _handleModeSwitch(ref.read(aiModeProvider));
       } else {
-        // Tab became inactive: teardown active pipelines to release hardware
-        final currentMode = ref.read(aiModeProvider);
-        if (currentMode == AiMode.localYolo) {
-          await _teardownYolo();
-        } else {
-          await _teardownGemini();
-        }
-        ref.read(modeTransitionProvider.notifier).state = ModeTransitionState.idle;
+        // Tab became inactive: stop the mode AND release the camera so the
+        // Face tab / other tabs can use camera hardware without contention.
+        await _suspendPipelines();
       }
     });
 
     final aiMode = ref.watch(aiModeProvider);
     final transitionState = ref.watch(modeTransitionProvider);
     final bool isYolo = aiMode == AiMode.localYolo;
-    final bool isTransitioning = transitionState == ModeTransitionState.transitioning;
+    final bool isTransitioning =
+        transitionState == ModeTransitionState.transitioning;
 
     final videoInput = ref.read(videoInputProvider);
 
@@ -634,9 +737,13 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
       statusColor = const Color(0xFF00FF88);
       statusText = _cameraIsActive ? "LOCAL YOLO" : "YOLO PAUSED";
     } else {
-      statusColor = _liveSessionIsOpen ? const Color(0xFF00E5FF) : Colors.orangeAccent;
+      statusColor =
+          _liveSessionIsOpen ? const Color(0xFF00E5FF) : Colors.orangeAccent;
       statusText = _liveSessionIsOpen ? "GEMINI LIVE" : "CONNECTING...";
     }
+
+    final Size? previewSize =
+        _cameraIsActive ? _previewSizeOrNull(videoInput) : null;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -660,13 +767,15 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
               color: const Color(0xFF20563F).withValues(alpha: 0.1),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.eco_rounded, color: Color(0xFF20563F), size: 20),
+            child: const Icon(Icons.eco_rounded,
+                color: Color(0xFF20563F), size: 20),
           ),
         ),
       ),
       body: Stack(
         children: [
-          const LuxuryBackground(),
+          // Static background: isolate its repaints from the live camera/overlay.
+          const RepaintBoundary(child: LuxuryBackground()),
 
           // Camera Preview / AI Viewport
           Center(
@@ -691,40 +800,45 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
                 borderRadius: BorderRadius.circular(30),
                 child: Stack(
                   children: [
-                    // Camera Feed (Native Smooth Preview)
-                    if (_cameraIsActive && videoInput.isInitialized)
-                      Builder(builder: (context) {
-                        try {
-                          return SizedBox.expand(
+                    // Camera feed. FittedBox(cover) keeps the preview geometry
+                    // identical to what YoloPainter assumes, so boxes line up.
+                    if (previewSize != null)
+                      SizedBox.expand(
+                        child: FittedBox(
+                          fit: BoxFit.cover,
+                          clipBehavior: Clip.hardEdge,
+                          child: SizedBox(
+                            // Portrait box: short side = width, long side = height,
+                            // whichever way the plugin reports previewSize.
+                            width:
+                                math.min(previewSize.width, previewSize.height),
+                            height:
+                                math.max(previewSize.width, previewSize.height),
                             child: CameraPreview(videoInput.cameraController),
-                          );
-                        } catch (_) {
-                          return const Center(
-                            child: Icon(Icons.videocam_off_rounded, size: 80, color: Colors.black12),
-                          );
-                        }
-                      })
+                          ),
+                        ),
+                      )
                     else
                       const Center(
-                        child: Icon(Icons.videocam_off_rounded, size: 80, color: Colors.black12),
+                        child: Icon(Icons.videocam_off_rounded,
+                            size: 80, color: Colors.black12),
                       ),
 
-                    // YOLO Overlay
-                    if (isYolo && _cameraIsActive && _detections.isNotEmpty)
+                    // YOLO overlay – repaints on its own when detections change.
+                    if (isYolo && previewSize != null)
                       Positioned.fill(
-                        child: CustomPaint(
-                          painter: YoloPainter(
-                            _detections,
-                            previewSize: () {
-                              try {
-                                return videoInput.isInitialized
-                                    ? videoInput.cameraController.value.previewSize
-                                    : null;
-                              } catch (_) {
-                                return null;
-                              }
-                            }(),
-                          ),
+                        child: ValueListenableBuilder<List<DetectionResult>>(
+                          valueListenable: _detectionsNotifier,
+                          builder: (context, detections, _) {
+                            return RepaintBoundary(
+                              child: CustomPaint(
+                                painter: YoloPainter(
+                                  detections,
+                                  previewSize: previewSize,
+                                ),
+                              ),
+                            );
+                          },
                         ),
                       ),
 
@@ -733,7 +847,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
                       top: 20,
                       right: 20,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
                         decoration: BoxDecoration(
                           color: Colors.black.withValues(alpha: 0.45),
                           borderRadius: BorderRadius.circular(20),
@@ -752,9 +867,11 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
                                 color: statusColor,
                                 shape: BoxShape.circle,
                               ),
-                            ).animate(onPlay: (controller) => controller.repeat())
-                             .fadeIn(duration: 500.ms)
-                             .fadeOut(delay: 500.ms, duration: 500.ms),
+                            )
+                                .animate(
+                                    onPlay: (controller) => controller.repeat())
+                                .fadeIn(duration: 500.ms)
+                                .fadeOut(delay: 500.ms, duration: 500.ms),
                             const SizedBox(width: 8),
                             Text(
                               statusText,
@@ -783,21 +900,28 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
               children: [
                 // Camera Toggle
                 _buildActionButton(
-                  icon: _cameraIsActive ? Icons.videocam_rounded : Icons.videocam_off_rounded,
+                  icon: _cameraIsActive
+                      ? Icons.videocam_rounded
+                      : Icons.videocam_off_rounded,
                   isActive: _cameraIsActive,
                   isEnabled: !isTransitioning,
-                  tooltip: _cameraIsActive ? "Turn off camera" : "Turn on camera",
+                  tooltip:
+                      _cameraIsActive ? "Turn off camera" : "Turn on camera",
                   onTap: toggleVideoStream,
                 ),
                 const SizedBox(height: 20),
                 // Mic Toggle (Active in Cloud Gemini mode; disabled in YOLO mode)
                 _buildActionButton(
-                  icon: _audioStreamIsActive ? Icons.mic_rounded : Icons.mic_off_rounded,
+                  icon: _audioStreamIsActive
+                      ? Icons.mic_rounded
+                      : Icons.mic_off_rounded,
                   isActive: _audioStreamIsActive,
                   isEnabled: !isTransitioning && !isYolo,
                   tooltip: isYolo
                       ? "Microphone is only used in Cloud Gemini mode"
-                      : (_audioStreamIsActive ? "Mute microphone" : "Unmute microphone"),
+                      : (_audioStreamIsActive
+                          ? "Mute microphone"
+                          : "Unmute microphone"),
                   onTap: toggleAudioStream,
                 ),
               ],
@@ -842,7 +966,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
                 )
               ],
               border: Border.all(
-                color: const Color(0xFF20563F).withValues(alpha: isActive ? 0 : 0.2),
+                color: const Color(0xFF20563F)
+                    .withValues(alpha: isActive ? 0 : 0.2),
               ),
             ),
             child: Icon(
@@ -855,13 +980,18 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
     );
   }
 
-  Widget _buildModeSelector(AiMode currentMode, ModeTransitionState transitionState) {
-    final bool isTransitioning = transitionState == ModeTransitionState.transitioning;
+  Widget _buildModeSelector(
+      AiMode currentMode, ModeTransitionState transitionState) {
+    final bool isTransitioning =
+        transitionState == ModeTransitionState.transitioning;
     final bool isYolo = currentMode == AiMode.localYolo;
 
     return Semantics(
-      label: "AI Mode: ${isYolo ? 'Local YOLO on-device' : 'Cloud Gemini live assistant'}",
-      hint: isTransitioning ? "Switching modes, please wait" : "Double tap to switch AI mode",
+      label:
+          "AI Mode: ${isYolo ? 'Local YOLO on-device' : 'Cloud Gemini live assistant'}",
+      hint: isTransitioning
+          ? "Switching modes, please wait"
+          : "Double tap to switch AI mode",
       button: true,
       enabled: !isTransitioning,
       child: Container(
@@ -888,7 +1018,9 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
               size: 20,
               color: isTransitioning
                   ? Colors.grey
-                  : (isYolo ? const Color(0xFF20563F) : const Color(0xFF007A87)),
+                  : (isYolo
+                      ? const Color(0xFF20563F)
+                      : const Color(0xFF007A87)),
             ),
             const SizedBox(width: 8),
             Text(
@@ -906,7 +1038,8 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
               onChanged: isTransitioning
                   ? null
                   : (isGemini) {
-                      _handleModeSwitch(isGemini ? AiMode.cloudGemini : AiMode.localYolo);
+                      _handleModeSwitch(
+                          isGemini ? AiMode.cloudGemini : AiMode.localYolo);
                     },
               activeTrackColor: const Color(0xFF007A87),
               activeThumbColor: Colors.white,
@@ -920,11 +1053,33 @@ class _MyHomePageState extends ConsumerState<FlutterFireAILiveAPIDemo> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// YOLO bounding-box overlay
+// ─────────────────────────────────────────────────────────────────────────────
+
 class YoloPainter extends CustomPainter {
   final List<DetectionResult> detections;
   final Size? previewSize;
 
   YoloPainter(this.detections, {this.previewSize});
+
+  // Allocated once instead of per frame.
+  static final Paint _boxPaint = Paint()
+    ..color =
+        const Color(0xFF00FF88) // High-contrast neon green for accessibility
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2.5;
+  static final Paint _fillPaint = Paint()
+    ..color = const Color(0x3300FF88) // Subtle translucent overlay
+    ..style = PaintingStyle.fill;
+  static final Paint _labelBgPaint = Paint()..color = const Color(0xFF00FF88);
+  static const TextStyle _labelStyle = TextStyle(
+    color: Colors.black,
+    fontSize: 12,
+    fontWeight: FontWeight.bold,
+  );
+  static final TextPainter _textPainter =
+      TextPainter(textDirection: TextDirection.ltr);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -935,15 +1090,19 @@ class YoloPainter extends CustomPainter {
     double offsetX = 0.0;
     double offsetY = 0.0;
 
-    // Handle camera sensor aspect ratio scaling (portrait sensor width/height swapped in BoxFit.cover)
-    if (previewSize != null && previewSize!.width > 0 && previewSize!.height > 0) {
-      final bool isPortrait = size.height > size.width;
-      final double imageWidth = isPortrait ? previewSize!.height : previewSize!.width;
-      final double imageHeight = isPortrait ? previewSize!.width : previewSize!.height;
+    // The preview is drawn BoxFit.cover. Detections are normalised to the whole
+    // upright frame, so map them onto the same "cover" rectangle. previewSize
+    // may be reported landscape or portrait, so orient it to the viewport.
+    final ps = previewSize;
+    if (ps != null && ps.width > 0 && ps.height > 0) {
+      final bool portrait = size.height > size.width;
+      final double shortSide = math.min(ps.width, ps.height);
+      final double longSide = math.max(ps.width, ps.height);
+      final double imageWidth = portrait ? shortSide : longSide;
+      final double imageHeight = portrait ? longSide : shortSide;
 
-      final double scale = (size.width / imageWidth > size.height / imageHeight)
-          ? size.width / imageWidth
-          : size.height / imageHeight;
+      final double scale =
+          math.max(size.width / imageWidth, size.height / imageHeight);
 
       final double renderedWidth = imageWidth * scale;
       final double renderedHeight = imageHeight * scale;
@@ -954,57 +1113,37 @@ class YoloPainter extends CustomPainter {
       scaleY = renderedHeight;
     }
 
-    final boxPaint = Paint()
-      ..color = const Color(0xFF00FF88) // High-contrast neon green for accessibility
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.5;
-
-    final fillPaint = Paint()
-      ..color = const Color(0x3300FF88) // Subtle translucent overlay
-      ..style = PaintingStyle.fill;
-
-    final textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-    );
-
     for (final detection in detections) {
+      final r = detection.rect;
       final rect = Rect.fromLTWH(
-        offsetX + detection.rect.left * scaleX,
-        offsetY + detection.rect.top * scaleY,
-        detection.rect.width * scaleX,
-        detection.rect.height * scaleY,
+        offsetX + r.left * scaleX,
+        offsetY + r.top * scaleY,
+        r.width * scaleX,
+        r.height * scaleY,
       );
 
       // Draw bounding box with rounded corners
       final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(8));
-      canvas.drawRRect(rrect, fillPaint);
-      canvas.drawRRect(rrect, boxPaint);
+      canvas.drawRRect(rrect, _fillPaint);
+      canvas.drawRRect(rrect, _boxPaint);
 
       // Draw high-visibility label pill
-      final labelText = '${detection.label} ${(detection.confidence * 100).toStringAsFixed(0)}%';
-      textPainter.text = TextSpan(
-        text: labelText,
-        style: const TextStyle(
-          color: Colors.black,
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-        ),
-      );
-      textPainter.layout();
+      final labelText =
+          '${detection.label} ${(detection.confidence * 100).toStringAsFixed(0)}%';
+      _textPainter.text = TextSpan(text: labelText, style: _labelStyle);
+      _textPainter.layout();
 
-      final labelTop = (rect.top - 22).clamp(0.0, size.height - 22);
+      final double labelTop =
+          math.max(0.0, math.min(rect.top - 22, size.height - 22));
+      final double labelLeft = math.max(
+          0.0, math.min(rect.left, size.width - _textPainter.width - 12));
       final labelBgRect = RRect.fromRectAndRadius(
-        Rect.fromLTWH(
-          rect.left.clamp(0.0, size.width - textPainter.width - 12),
-          labelTop,
-          textPainter.width + 10,
-          20,
-        ),
+        Rect.fromLTWH(labelLeft, labelTop, _textPainter.width + 10, 20),
         const Radius.circular(4),
       );
 
-      canvas.drawRRect(labelBgRect, Paint()..color = const Color(0xFF00FF88));
-      textPainter.paint(
+      canvas.drawRRect(labelBgRect, _labelBgPaint);
+      _textPainter.paint(
         canvas,
         Offset(labelBgRect.left + 5, labelBgRect.top + 2),
       );
@@ -1013,6 +1152,7 @@ class YoloPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant YoloPainter oldDelegate) {
-    return oldDelegate.detections != detections || oldDelegate.previewSize != previewSize;
+    return oldDelegate.detections != detections ||
+        oldDelegate.previewSize != previewSize;
   }
 }
